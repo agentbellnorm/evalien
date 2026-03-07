@@ -1,0 +1,13 @@
+{
+  "name": "repl-ai",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "repl": "node --env-file=.env agent.mjs",
+    "repl:docker": "podman build -t repl-ai . && podman run -it --env-file=.env --network=bridge --cap-drop=ALL --security-opt=no-new-privileges --memory=512m --cpus=1 --read-only --tmpfs /tmp repl-ai"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0"
+  }
+}
