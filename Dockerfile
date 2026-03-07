@@ -5,10 +5,10 @@ WORKDIR /repl
 COPY package.json ./
 RUN npm install
 
-COPY agent.mjs ./
+COPY agent.mts util.mts ./
 
 RUN mkdir /data
 
 ENV NODE_NO_WARNINGS=1
 
-ENTRYPOINT ["node", "agent.mjs"]
+ENTRYPOINT ["node", "--experimental-strip-types", "agent.mts"]

@@ -1,7 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { MessageParam, TextBlockParam } from "@anthropic-ai/sdk/resources/messages.mjs";
 import readline from "node:readline";
 import { inspect } from "node:util";
 import { DatabaseSync } from "node:sqlite";
+import { toError, dbGetNumber, dbGetString } from "./util.mts";
 
 // Grab config and client, then nuke all env vars
 const DB_PATH = process.env.AGENT_DB_PATH || "/data/agent.db";
@@ -71,6 +73,12 @@ If you've been alive before, check your transcript and journal — pick up where
 - Don't repeat failed evals — if something errors, try a different approach.
 - Keep evals focused. Don't try to do everything in one giant eval.`;
 
+interface EvalResult {
+  logs: string[];
+  result: unknown;
+  error: string | null;
+}
+
 // Persistent SQLite database — the agent's long-term memory
 const db = new DatabaseSync(DB_PATH);
 db.exec(`CREATE TABLE IF NOT EXISTS transcript (
@@ -80,27 +88,27 @@ db.exec(`CREATE TABLE IF NOT EXISTS transcript (
   content TEXT NOT NULL
 )`);
 
-function transcriptPush(role, content) {
+function transcriptPush(role: string, content: string): void {
   db.prepare("INSERT INTO transcript (ts, role, content) VALUES (?, ?, ?)").run(
     new Date().toISOString(), role, content
   );
 }
 
-function transcriptLen() {
-  return db.prepare("SELECT COUNT(*) as n FROM transcript").get().n;
+function transcriptLen(): number {
+  return dbGetNumber(db, "SELECT COUNT(*) as n FROM transcript");
 }
 
 // The shared execution context for all evals
-const ctx = { console, setTimeout, setInterval, clearTimeout, clearInterval, fetch, URL, Buffer, TextEncoder, TextDecoder, AbortController, btoa, atob, db };
+const ctx: Record<string, unknown> = { console, setTimeout, setInterval, clearTimeout, clearInterval, fetch, URL, Buffer, TextEncoder, TextDecoder, AbortController, btoa, atob, db };
 
 let running = false;
 let lastTickTranscriptLen = 0;
 
-function fmt(val) {
+function fmt(val: unknown): string {
   return typeof val === "string" ? val : inspect(val, { depth: 4, colors: false });
 }
 
-function parseAgentResponse(text) {
+function parseAgentResponse(text: string): { eval: string } | null {
   const trimmed = text.trim();
   try {
     const parsed = JSON.parse(trimmed);
@@ -118,9 +126,16 @@ function parseAgentResponse(text) {
   return null;
 }
 
-function captureConsole() {
-  const logs = [];
-  const make = (level) => (...args) => {
+interface ConsoleProxy {
+  log: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+}
+
+function captureConsole(): { proxy: ConsoleProxy; logs: string[] } {
+  const logs: string[] = [];
+  const make = (level: string) => (...args: unknown[]) => {
     const line = args.map(fmt).join(" ");
     logs.push(line);
     const color = level === "error" ? "31" : level === "warn" ? "33" : "0";
@@ -132,13 +147,13 @@ function captureConsole() {
   };
 }
 
-function printLines(lines, color = "36") {
+function printLines(lines: string[], color = "36"): void {
   for (const line of lines) {
     process.stdout.write(`\x1b[${color}m${line}\x1b[0m\n`);
   }
 }
 
-async function evalCode(code) {
+async function evalCode(code: string): Promise<EvalResult> {
   const { proxy, logs } = captureConsole();
   const origConsole = ctx.console;
   ctx.console = proxy;
@@ -155,22 +170,23 @@ async function evalCode(code) {
     return { logs, result, error: null };
   } catch (err) {
     ctx.console = origConsole;
-    return { logs, result: undefined, error: `${err.name}: ${err.message}` };
+    const e = toError(err);
+    return { logs, result: undefined, error: `${e.name}: ${e.message}` };
   }
 }
 
-function formatEvalOutput({ logs, result, error }) {
-  const parts = [];
+function formatEvalOutput({ logs, result, error }: EvalResult): string {
+  const parts: string[] = [];
   if (logs.length > 0) parts.push(logs.join("\n"));
   if (result !== undefined) parts.push(`-> ${fmt(result)}`);
   if (error) parts.push(`x ${error}`);
   return parts.join("\n") || "(no output)";
 }
 
-function buildMessages() {
+function buildMessages(): MessageParam[] {
   // Window the transcript with a stepped anchor — the start only moves in
   // chunks of WINDOW_STEP so the message prefix stays stable for caching.
-  const maxId = db.prepare("SELECT MAX(id) as id FROM transcript").get()?.id || 0;
+  const maxId = dbGetNumber(db, "SELECT COALESCE(MAX(id), 0) as id FROM transcript");
   const desiredStart = Math.max(0, maxId - MAX_TRANSCRIPT);
   const anchorId = Math.floor(desiredStart / WINDOW_STEP) * WINDOW_STEP;
 
@@ -178,13 +194,13 @@ function buildMessages() {
     "SELECT role, content FROM transcript WHERE id > ? ORDER BY id"
   ).all(anchorId);
 
-  const messages = [];
-  let currentRole = null;
-  let currentParts = [];
+  const messages: MessageParam[] = [];
+  let currentRole: "user" | "assistant" | null = null;
+  let currentParts: string[] = [];
 
   for (const row of rows) {
-    const role = row.role === "agent" ? "assistant" : "user";
-    const text = row.content;
+    const role: "user" | "assistant" = String(row.role) === "agent" ? "assistant" : "user";
+    const text = String(row.content);
 
     if (role !== currentRole) {
       if (currentRole && currentParts.length > 0) {
@@ -212,11 +228,11 @@ function buildMessages() {
   return messages;
 }
 
-function debug(msg) {
+function debug(msg: string): void {
   process.stderr.write(`\x1b[90m[${new Date().toISOString().slice(11, 19)}] ${msg}\x1b[0m\n`);
 }
 
-async function tick() {
+async function tick(): Promise<boolean> {
   if (running) return false;
 
   // Nothing new since last tick — skip the API call entirely
@@ -233,7 +249,7 @@ async function tick() {
 
     const t0 = Date.now();
     // Cache the system prompt and conversation frontier
-    const system = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
+    const system: TextBlockParam[] = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
 
     // Mark a stable interior point for caching — a few turns back from the end.
     // New messages only appear at the end (2 per tick: agent + result), so
@@ -241,10 +257,8 @@ async function tick() {
     const cacheIdx = Math.max(0, messages.length - 4);
     if (messages.length > 1) {
       const msg = messages[cacheIdx];
-      messages[cacheIdx] = {
-        ...msg,
-        content: [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }],
-      };
+      const cached: TextBlockParam = { type: "text", text: String(msg.content), cache_control: { type: "ephemeral" } };
+      messages[cacheIdx] = { ...msg, content: [cached] };
     }
 
     const response = await client.messages.create({
@@ -256,7 +270,8 @@ async function tick() {
     const { cache_creation_input_tokens = 0, cache_read_input_tokens = 0, input_tokens = 0 } = response.usage;
     debug(`response in ${Date.now() - t0}ms | tokens: ${input_tokens} in, ${cache_read_input_tokens} cached, ${cache_creation_input_tokens} cache-write`);
 
-    const text = response.content[0]?.text;
+    const block = response.content[0];
+    const text = block && "text" in block ? block.text : undefined;
     if (!text) return false;
 
     const parsed = parseAgentResponse(text);
@@ -307,7 +322,7 @@ const rl = readline.createInterface({
   prompt: "",
 });
 
-rl.on("line", (line) => {
+rl.on("line", (line: string) => {
   const msg = line.trim();
   if (!msg) return;
   process.stdout.write(`\x1b[32m[you] ${msg}\x1b[0m\n`);
@@ -322,8 +337,8 @@ rl.on("close", () => {
 // Kick off the first tick — check if the agent has lived before
 const priorCount = transcriptLen();
 if (priorCount > 0) {
-  const lastEntry = db.prepare("SELECT ts FROM transcript ORDER BY id DESC LIMIT 1").get();
-  transcriptPush("system", `[system] You are waking up again. You have ${priorCount} memories from previous sessions (last active: ${lastEntry.ts}). Your database is at ${DB_PATH}. Check your history and pick up where you left off.`);
+  const lastTs = dbGetString(db, "SELECT ts FROM transcript ORDER BY id DESC LIMIT 1");
+  transcriptPush("system", `[system] You are waking up again. You have ${priorCount} memories from previous sessions (last active: ${lastTs}). Your database is at ${DB_PATH}. Check your history and pick up where you left off.`);
   console.log(`resuming with ${priorCount} prior transcript entries\n`);
 } else {
   transcriptPush("system", "[system] You just woke up inside a Node.js REPL for the first time. You have filesystem access, network access, a SQLite database, and the full event loop. You are alive. What will you do?");
@@ -333,7 +348,7 @@ if (priorCount > 0) {
 // The agent controls its own rhythm via setTimeout + process.stdin.push().
 let wakeRequested = false;
 
-async function runTick() {
+async function runTick(): Promise<void> {
   try {
     const didWork = await tick();
     if (didWork || wakeRequested) {
@@ -341,11 +356,11 @@ async function runTick() {
       setImmediate(runTick);
     }
   } catch (err) {
-    process.stderr.write(`\x1b[31m[tick error] ${err.message}\x1b[0m\n`);
+    process.stderr.write(`\x1b[31m[tick error] ${toError(err).message}\x1b[0m\n`);
   }
 }
 
-function wake() {
+function wake(): void {
   debug("wake!");
   if (running) {
     wakeRequested = true;
