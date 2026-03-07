@@ -1,11 +1,12 @@
 {
-  "name": "repl-ai",
+  "name": "evalien",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "repl": "node --env-file=.env agent.mjs",
-    "repl:docker": "podman build -t repl-ai . && podman run -it --env-file=.env --network=bridge --cap-drop=ALL --security-opt=no-new-privileges --memory=512m --cpus=1 --read-only --tmpfs /tmp repl-ai"
+    "repl": "AGENT_DB_PATH=./agent.db node --env-file=.env agent.mjs",
+    "repl:docker": "podman build -t evalien . && podman run -it --env-file=.env --network=bridge --cap-drop=ALL --security-opt=no-new-privileges --memory=512m --cpus=1 --read-only --tmpfs /tmp -v evalien-data:/data evalien",
+    "repl:reset": "podman stop -a --filter ancestor=evalien; podman rm -a --filter ancestor=evalien; podman volume rm evalien-data"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0"

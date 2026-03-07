@@ -7,7 +7,8 @@ RUN npm install
 
 COPY agent.mjs ./
 
-# No host env vars leak in — API key must be passed explicitly at runtime
+RUN mkdir /data
+
 ENV NODE_NO_WARNINGS=1
 
 ENTRYPOINT ["node", "agent.mjs"]

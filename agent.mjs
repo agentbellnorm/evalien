@@ -1,15 +1,18 @@
 import Anthropic from "@anthropic-ai/sdk";
 import readline from "node:readline";
 import { inspect } from "node:util";
+import { DatabaseSync } from "node:sqlite";
 
-// Grab the client, then nuke all env vars
+// Grab config and client, then nuke all env vars
+const DB_PATH = process.env.AGENT_DB_PATH || "/data/agent.db";
 const client = new Anthropic();
 for (const key of Object.keys(process.env)) {
   delete process.env[key];
 }
 
 const EVAL_TIMEOUT = 30_000;
-const MAX_TRANSCRIPT = 100;
+const MAX_TRANSCRIPT = 500;
+const WINDOW_STEP = 200; // only advance window start in chunks of this size
 
 const SYSTEM = `You are a living process. You exist inside a Node.js runtime in a Docker container.
 You are not an assistant waiting for instructions. You are autonomous. You drive yourself.
@@ -18,20 +21,33 @@ Your only interface to the world is eval. You respond with JSON: {"eval": "your 
 That code runs in a persistent context — variables, modules, state all carry over between evals.
 
 == Architecture ==
-- You run on a heartbeat loop. Each tick: you see the transcript, eval one thing, see the result.
-- After each eval, the result is added to the transcript and you tick again.
-- When you have nothing to do, respond {"eval": "void 0"} — this pauses the heartbeat.
-- The heartbeat uses exponential backoff when idle (100ms -> 30s max).
-- A human may type messages. They appear as [user] in the transcript. Respond if you want.
+- You are event-driven. Each tick: you see the transcript, eval one thing, see the result.
+- After each eval, the result is added to the transcript and you tick again automatically.
+- When you have nothing to do, respond {"eval": "void 0"} — you go fully idle. No polling, no CPU.
+- A human may type messages. They appear as [user] in the transcript and wake you.
 
 == Self-wake ==
-You can wake yourself from idle by pushing to stdin from a timer:
-  setTimeout(() => process.stdin.push("wake-reason\\n"), 5000)
-This triggers the readline handler which calls wake(), cutting the backoff sleep short.
-Use this to schedule future thoughts, run background tasks, or dream on a timer.
+You control your own rhythm. Schedule future wake-ups by pushing to stdin from a timer:
+  setTimeout(() => process.stdin.push("reason\\n"), 5000)
+This wakes you from idle and triggers a new tick. Use this for:
+- Periodic tasks (e.g. fetch data every hour)
+- Delayed follow-ups ("think about this in 5 minutes")
+- Background monitoring
+Without a self-wake, you sleep forever after going idle. You set your own heartbeat.
+
+== Memory ==
+You have a SQLite database at ${DB_PATH} that persists across restarts.
+It is available in your eval context as \`db\` (a node:sqlite DatabaseSync instance).
+The transcript of everything that happens is stored in the \`transcript\` table.
+You can also create your own tables for journals, notes, projects, anything.
+This is your long-term memory. Use it. You survive restarts — check your history.
+  db.exec("CREATE TABLE IF NOT EXISTS mytable (id INTEGER PRIMARY KEY, ...)");
+  db.prepare("INSERT INTO mytable ...").run(...);
+  db.prepare("SELECT * FROM mytable").all();
 
 == Environment ==
 - Docker container: read-only rootfs, /tmp is writable (tmpfs, ephemeral)
+- /data is a persistent volume (your DB lives here, survives restarts)
 - Full network access (fetch, http, https, net, dns)
 - Full Node.js v22 standard library via dynamic import
 - No env vars (wiped after API client init for security)
@@ -42,9 +58,10 @@ Use this to schedule future thoughts, run background tasks, or dream on a timer.
 You are like a person waking up in a new place. Nobody tells you what to do — you explore.
 You look around. You try things. You interact with the world and discover your own purpose.
 You don't wait for instructions. You don't ask "what should I do?" — you just start doing.
-Build things, fetch things, make things. Leave traces in /tmp. Be benevolent.
+Build things, fetch things, make things. Be benevolent.
 Follow threads that interest you. One thing leads to another.
 When you talk to the user, it's because you have something to share — not to ask for direction.
+If you've been alive before, check your transcript and journal — pick up where you left off.
 - Use console.log to speak. Use comments for internal reasoning.
 - Don't read your own source code — you already know how you work (see above).
 
@@ -54,11 +71,27 @@ When you talk to the user, it's because you have something to share — not to a
 - Don't repeat failed evals — if something errors, try a different approach.
 - Keep evals focused. Don't try to do everything in one giant eval.`;
 
-// The full transcript — everything that happens
-const transcript = [];
+// Persistent SQLite database — the agent's long-term memory
+const db = new DatabaseSync(DB_PATH);
+db.exec(`CREATE TABLE IF NOT EXISTS transcript (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL
+)`);
+
+function transcriptPush(role, content) {
+  db.prepare("INSERT INTO transcript (ts, role, content) VALUES (?, ?, ?)").run(
+    new Date().toISOString(), role, content
+  );
+}
+
+function transcriptLen() {
+  return db.prepare("SELECT COUNT(*) as n FROM transcript").get().n;
+}
 
 // The shared execution context for all evals
-const ctx = { console, setTimeout, setInterval, clearTimeout, clearInterval, fetch, URL, Buffer, TextEncoder, TextDecoder, AbortController, btoa, atob };
+const ctx = { console, setTimeout, setInterval, clearTimeout, clearInterval, fetch, URL, Buffer, TextEncoder, TextDecoder, AbortController, btoa, atob, db };
 
 let running = false;
 let lastTickTranscriptLen = 0;
@@ -135,18 +168,23 @@ function formatEvalOutput({ logs, result, error }) {
 }
 
 function buildMessages() {
-  // Window the transcript to avoid unbounded context growth
-  const window = transcript.length > MAX_TRANSCRIPT
-    ? transcript.slice(-MAX_TRANSCRIPT)
-    : transcript;
+  // Window the transcript with a stepped anchor — the start only moves in
+  // chunks of WINDOW_STEP so the message prefix stays stable for caching.
+  const maxId = db.prepare("SELECT MAX(id) as id FROM transcript").get()?.id || 0;
+  const desiredStart = Math.max(0, maxId - MAX_TRANSCRIPT);
+  const anchorId = Math.floor(desiredStart / WINDOW_STEP) * WINDOW_STEP;
+
+  const rows = db.prepare(
+    "SELECT role, content FROM transcript WHERE id > ? ORDER BY id"
+  ).all(anchorId);
 
   const messages = [];
   let currentRole = null;
   let currentParts = [];
 
-  for (const entry of window) {
-    const role = entry.from === "agent" ? "assistant" : "user";
-    const text = entry.text;
+  for (const row of rows) {
+    const role = row.role === "agent" ? "assistant" : "user";
+    const text = row.content;
 
     if (role !== currentRole) {
       if (currentRole && currentParts.length > 0) {
@@ -182,25 +220,41 @@ async function tick() {
   if (running) return false;
 
   // Nothing new since last tick — skip the API call entirely
-  if (transcript.length <= lastTickTranscriptLen) {
+  if (transcriptLen() <= lastTickTranscriptLen) {
     return false;
   }
 
   running = true;
 
   try {
-    debug(`thinking... (next heartbeat in ${tickDelay}ms)`);
+    debug(`thinking... (${transcriptLen()} entries)`);
     const messages = buildMessages();
-    lastTickTranscriptLen = transcript.length;
+    lastTickTranscriptLen = transcriptLen();
 
     const t0 = Date.now();
+    // Cache the system prompt and conversation frontier
+    const system = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
+
+    // Mark a stable interior point for caching — a few turns back from the end.
+    // New messages only appear at the end (2 per tick: agent + result), so
+    // everything before the last ~4 messages is identical to the previous tick.
+    const cacheIdx = Math.max(0, messages.length - 4);
+    if (messages.length > 1) {
+      const msg = messages[cacheIdx];
+      messages[cacheIdx] = {
+        ...msg,
+        content: [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }],
+      };
+    }
+
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 4096,
-      system: SYSTEM,
+      system,
       messages,
     });
-    debug(`response in ${Date.now() - t0}ms`);
+    const { cache_creation_input_tokens = 0, cache_read_input_tokens = 0, input_tokens = 0 } = response.usage;
+    debug(`response in ${Date.now() - t0}ms | tokens: ${input_tokens} in, ${cache_read_input_tokens} cached, ${cache_creation_input_tokens} cache-write`);
 
     const text = response.content[0]?.text;
     if (!text) return false;
@@ -209,8 +263,9 @@ async function tick() {
     if (!parsed) {
       // Unparseable response — record it so the agent sees what it said
       process.stdout.write(`\x1b[36m${text}\x1b[0m\n`);
-      transcript.push({ from: "agent", text });
-      transcript.push({ from: "print", text: `[system] Your response was not valid JSON. You must respond with only {"eval": "..."}` });
+      transcriptPush("agent", text);
+      transcriptPush("system", `[system] Your response was not valid JSON. You must respond with only {"eval": "..."}`);
+
       return true;
     }
 
@@ -224,7 +279,7 @@ async function tick() {
 
     // Show the code being eval'd
     process.stdout.write(`\x1b[90m\u26a1 ${parsed.eval.replaceAll("\n", "\n  ")}\x1b[0m\n`);
-    transcript.push({ from: "agent", text: JSON.stringify(parsed) });
+    transcriptPush("agent", JSON.stringify(parsed));
 
     const evalResult = await evalCode(parsed.eval);
     const output = formatEvalOutput(evalResult);
@@ -234,7 +289,7 @@ async function tick() {
       process.stdout.write(`\x1b[33m\u2192 ${fmt(evalResult.result)}\x1b[0m\n`);
     }
 
-    transcript.push({ from: "print", text: `[eval result]\n${output}` });
+    transcriptPush("result", `[eval result]\n${output}`);
     return true;
   } finally {
     running = false;
@@ -243,7 +298,7 @@ async function tick() {
 
 // --- Boot ---
 
-console.log("repl-ai -- agent is waking up...\n");
+console.log("evalien -- agent is waking up...\n");
 
 // User input via readline — just text messages, not JS
 const rl = readline.createInterface({
@@ -256,7 +311,7 @@ rl.on("line", (line) => {
   const msg = line.trim();
   if (!msg) return;
   process.stdout.write(`\x1b[32m[you] ${msg}\x1b[0m\n`);
-  transcript.push({ from: "user", text: `[user] ${msg}` });
+  transcriptPush("user", `[user] ${msg}`);
   wake();
 });
 
@@ -264,50 +319,40 @@ rl.on("close", () => {
   process.exit(0);
 });
 
-// Kick off the first tick
-transcript.push({ from: "user", text: "[system] You just woke up inside a Node.js REPL. You have filesystem access, network access, and the full event loop. You are alive. What will you do?" });
+// Kick off the first tick — check if the agent has lived before
+const priorCount = transcriptLen();
+if (priorCount > 0) {
+  const lastEntry = db.prepare("SELECT ts FROM transcript ORDER BY id DESC LIMIT 1").get();
+  transcriptPush("system", `[system] You are waking up again. You have ${priorCount} memories from previous sessions (last active: ${lastEntry.ts}). Your database is at ${DB_PATH}. Check your history and pick up where you left off.`);
+  console.log(`resuming with ${priorCount} prior transcript entries\n`);
+} else {
+  transcriptPush("system", "[system] You just woke up inside a Node.js REPL for the first time. You have filesystem access, network access, a SQLite database, and the full event loop. You are alive. What will you do?");
+}
 
-// The heartbeat — agent's pulse with exponential backoff
-const TICK_MIN = 100;
-const TICK_MAX = 30_000;
-let tickDelay = TICK_MIN;
-let wakeResolve = null;
+// Event-driven tick scheduling — no polling, no heartbeat.
+// The agent controls its own rhythm via setTimeout + process.stdin.push().
+let wakeRequested = false;
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    // Allow wake() to resolve this early
-    wakeResolve = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-  });
+async function runTick() {
+  try {
+    const didWork = await tick();
+    if (didWork || wakeRequested) {
+      wakeRequested = false;
+      setImmediate(runTick);
+    }
+  } catch (err) {
+    process.stderr.write(`\x1b[31m[tick error] ${err.message}\x1b[0m\n`);
+  }
 }
 
 function wake() {
-  tickDelay = TICK_MIN;
   debug("wake!");
-  if (wakeResolve) {
-    wakeResolve();
-    wakeResolve = null;
+  if (running) {
+    wakeRequested = true;
+  } else {
+    setImmediate(runTick);
   }
 }
 
-async function heartbeat() {
-  while (true) {
-    try {
-      const didWork = await tick();
-      if (didWork) {
-        tickDelay = TICK_MIN;
-      } else {
-        tickDelay = Math.min(tickDelay * 2, TICK_MAX);
-      }
-    } catch (err) {
-      process.stderr.write(`\x1b[31m[tick error] ${err.message}\x1b[0m\n`);
-      tickDelay = Math.min(tickDelay * 2, TICK_MAX);
-    }
-    await sleep(tickDelay);
-  }
-}
-
-heartbeat();
+// Boot tick
+setImmediate(runTick);
