@@ -8,5 +8,5 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["*.mts"]
+  "include": ["src/**/*.mts"]
 }
