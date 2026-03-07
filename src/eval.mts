@@ -40,20 +40,22 @@ export async function evalCode(ctx: Record<string, unknown>, code: string): Prom
   const origConsole = ctx.console;
   ctx.console = proxy;
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const fn = new Function("__ctx", `with(__ctx) { return (async () => { ${code} })() }`);
     const result = await Promise.race([
       fn(ctx),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("eval timed out after 30s")), EVAL_TIMEOUT)
-      ),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("eval timed out after 30s")), EVAL_TIMEOUT);
+      }),
     ]);
-    ctx.console = origConsole;
     return { logs, result, error: null };
   } catch (err) {
-    ctx.console = origConsole;
     const e = toError(err);
     return { logs, result: undefined, error: `${e.name}: ${e.message}` };
+  } finally {
+    clearTimeout(timer);
+    ctx.console = origConsole;
   }
 }
 
@@ -72,7 +74,7 @@ export function parseAgentResponse(text: string): { eval: string } | null {
     if (parsed.eval !== undefined) return parsed;
   } catch {}
 
-  const braceMatch = trimmed.match(/\{[\s\S]*"eval"[\s\S]*\}/);
+  const braceMatch = trimmed.match(/\{[\s\S]*?"eval"[\s\S]*?\}/);
   if (braceMatch) {
     try {
       const parsed = JSON.parse(braceMatch[0]);

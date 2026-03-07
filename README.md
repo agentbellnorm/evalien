@@ -46,7 +46,11 @@ The container runs with:
 
 ## Files
 
-- `agent.mjs` — the entire agent (~360 lines)
+- `src/main.mts` — boot, readline, tick loop, wake scheduling
+- `src/system-prompt.mts` — the agent's system prompt
+- `src/transcript.mts` — SQLite persistence and message building
+- `src/eval.mts` — sandboxed code execution and response parsing
+- `src/util.mts` — error handling and formatting helpers
 - `Dockerfile` — hardened container image
 - `.env` — your API key (not committed)
 

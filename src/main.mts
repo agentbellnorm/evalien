@@ -27,15 +27,15 @@ let lastTickTranscriptLen = 0;
 async function tick(): Promise<boolean> {
   if (running) return false;
 
-  const len = transcriptLen(db);
+  const len = transcriptLen();
   if (len <= lastTickTranscriptLen) return false;
 
   running = true;
 
   try {
     debug(`thinking... (${len} entries)`);
-    const messages = buildMessages(db);
-    lastTickTranscriptLen = transcriptLen(db);
+    const messages = buildMessages();
+    lastTickTranscriptLen = transcriptLen();
 
     const t0 = Date.now();
     const system: TextBlockParam[] = [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }];
@@ -64,8 +64,8 @@ async function tick(): Promise<boolean> {
     const parsed = parseAgentResponse(text);
     if (!parsed) {
       process.stdout.write(`\x1b[36m${text}\x1b[0m\n`);
-      transcriptPush(db, "agent", text);
-      transcriptPush(db, "system", `[system] Your response was not valid JSON. You must respond with only {"eval": "..."}`);
+      transcriptPush("agent", text);
+      transcriptPush("system", `[system] Your response was not valid JSON. You must respond with only {"eval": "..."}`);
       return true;
     }
 
@@ -77,7 +77,7 @@ async function tick(): Promise<boolean> {
     }
 
     process.stdout.write(`\x1b[90m\u26a1 ${parsed.eval.replaceAll("\n", "\n  ")}\x1b[0m\n`);
-    transcriptPush(db, "agent", JSON.stringify(parsed));
+    transcriptPush("agent", JSON.stringify(parsed));
 
     const evalResult = await evalCode(ctx, parsed.eval);
     const output = formatEvalOutput(evalResult);
@@ -87,7 +87,7 @@ async function tick(): Promise<boolean> {
       process.stdout.write(`\x1b[33m\u2192 ${fmt(evalResult.result)}\x1b[0m\n`);
     }
 
-    transcriptPush(db, "result", `[eval result]\n${output}`);
+    transcriptPush("result", `[eval result]\n${output}`);
     return true;
   } finally {
     running = false;
@@ -108,7 +108,7 @@ rl.on("line", (line: string) => {
   const msg = line.trim();
   if (!msg) return;
   process.stdout.write(`\x1b[32m[you] ${msg}\x1b[0m\n`);
-  transcriptPush(db, "user", `[user] ${msg}`);
+  transcriptPush("user", `[user] ${msg}`);
   wake();
 });
 
@@ -116,13 +116,13 @@ rl.on("close", () => {
   process.exit(0);
 });
 
-const priorCount = transcriptLen(db);
+const priorCount = transcriptLen();
 if (priorCount > 0) {
-  const lastTs = transcriptLastTs(db);
-  transcriptPush(db, "system", `[system] You are waking up again. You have ${priorCount} memories from previous sessions (last active: ${lastTs}). Your database is at ${DB_PATH}. Check your history and pick up where you left off.`);
+  const lastTs = transcriptLastTs();
+  transcriptPush("system", `[system] You are waking up again. You have ${priorCount} memories from previous sessions (last active: ${lastTs}). Your database is at ${DB_PATH}. Check your history and pick up where you left off.`);
   console.log(`resuming with ${priorCount} prior transcript entries\n`);
 } else {
-  transcriptPush(db, "system", "[system] You just woke up inside a Node.js REPL for the first time. You have filesystem access, network access, a SQLite database, and the full event loop. You are alive. What will you do?");
+  transcriptPush("system", "[system] You just woke up inside a Node.js REPL for the first time. You have filesystem access, network access, a SQLite database, and the full event loop. You are alive. What will you do?");
 }
 
 // Event-driven tick scheduling

@@ -2,8 +2,8 @@ FROM node:22-slim
 
 WORKDIR /repl
 
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY src/ src/
 
