@@ -1,83 +1,86 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type {
-  MessageParam,
-  TextBlockParam,
-} from "@anthropic-ai/sdk/resources/messages.mjs";
+import { generateText, type TextPart } from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createGoogle } from "@ai-sdk/google";
+import type { Generate, GenerateInput } from "./generation.mts";
 import { debug } from "./util.mts";
 
-export function createClient(): Anthropic {
-  return new Anthropic();
+const providers = {
+  anthropic: { create: createAnthropic, key: "ANTHROPIC_API_KEY" },
+  openai: { create: createOpenAI, key: "OPENAI_API_KEY" },
+  google: { create: createGoogle, key: "GOOGLE_GENERATIVE_AI_API_KEY" },
+};
+
+export interface ModelConfig {
+  provider: keyof typeof providers;
+  model: string;
+  apiKey: string;
+  baseURL?: string;
+  maxOutputTokens: number;
 }
 
-export interface AgentEval {
-  eval: string;
-}
-
-export interface AgentBadResponse {
-  raw: string;
-}
-
-export type AgentResponse = AgentEval | AgentBadResponse | null;
-
-export async function callAgent(
-  client: Anthropic,
-  systemPrompt: string,
-  messages: MessageParam[],
-): Promise<AgentResponse> {
-  const t0 = Date.now();
-
-  const system: TextBlockParam[] = [
-    { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
-  ];
-
-  // Mark a stable interior point for prompt caching — a few turns back from
-  // the end. New messages only appear at the tail (2 per tick: agent + result),
-  // so everything before that is identical to the previous request.
-  const tagged = [...messages];
-  const cacheIdx = Math.max(0, tagged.length - 4);
-  if (tagged.length > 1) {
-    const msg = tagged[cacheIdx];
-    const cached: TextBlockParam = {
-      type: "text",
-      text: String(msg.content),
-      cache_control: { type: "ephemeral" },
-    };
-    tagged[cacheIdx] = { ...msg, content: [cached] };
+/** Capture configuration once, before the runtime clears the environment. */
+export function readModelConfig(env: Record<string, string | undefined>): ModelConfig {
+  const selection = env.MODEL ?? "anthropic/claude-sonnet-4-6";
+  const slash = selection.indexOf("/");
+  const provider = selection.slice(0, slash);
+  const model = selection.slice(slash + 1).trim();
+  if (slash < 1 || !Object.hasOwn(providers, provider) || !model) {
+    throw new Error("MODEL must be anthropic/<model>, openai/<model>, or google/<model>");
   }
-
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4096,
-    system,
-    messages: tagged,
-  });
-
-  const { cache_read_input_tokens = 0, input_tokens = 0 } = response.usage;
-  debug(
-    `response in ${Date.now() - t0}ms | tokens: ${input_tokens} in, ${cache_read_input_tokens} cached`,
-  );
-
-  const block = response.content[0];
-  const text = block && "text" in block ? block.text : undefined;
-  if (!text) return null;
-
-  return parseAgentResponse(text) ?? { raw: text };
+  const name = provider as keyof typeof providers;
+  const key = providers[name].key;
+  const apiKey = env[key]?.trim();
+  if (!apiKey) throw new Error(`Set ${key} for MODEL=${selection}`);
+  const maxOutputTokens = Number(env.MODEL_MAX_OUTPUT_TOKENS ?? 4096);
+  if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0) {
+    throw new Error("MODEL_MAX_OUTPUT_TOKENS must be a positive integer");
+  }
+  return { provider: name, model, apiKey, baseURL: env.MODEL_BASE_URL, maxOutputTokens };
 }
 
-function parseAgentResponse(text: string): AgentEval | null {
-  const trimmed = text.trim();
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed.eval !== undefined) return parsed;
-  } catch {}
+/** SDK types, provider settings, and cache state stay behind Generate. */
+export function createGenerate(config: ModelConfig, fetch?: typeof globalThis.fetch): Generate {
+  const model = providers[config.provider].create({
+    apiKey: config.apiKey,
+    baseURL: config.baseURL,
+    fetch,
+  }).languageModel(config.model);
+  const anthropic = config.provider === "anthropic";
+  const cacheOptions = { anthropic: { cacheControl: { type: "ephemeral" } } };
+  let previous: GenerateInput | undefined;
 
-  const braceMatch = trimmed.match(/\{[\s\S]*?"eval"[\s\S]*?\}/);
-  if (braceMatch) {
-    try {
-      const parsed = JSON.parse(braceMatch[0]);
-      if (parsed.eval !== undefined) return parsed;
-    } catch {}
-  }
+  // SDK diagnostics are host output, not observations from evaluated code.
+  globalThis.AI_SDK_LOG_WARNINGS = ({ warnings }) => debug(`model warnings: ${JSON.stringify(warnings)}`);
 
-  return null;
+  return async ({ instructions, blocks }) => {
+    const snapshot = [...blocks];
+    if (snapshot.length === 0) throw new Error("Generation requires at least one prompt block");
+    const extendsPrevious = previous?.instructions === instructions &&
+      previous.blocks.length <= snapshot.length &&
+      previous.blocks.every((block, i) => block === snapshot[i]);
+    const previousEnd = extendsPrevious ? previous!.blocks.length - 1 : -1;
+    const content: TextPart[] = snapshot.map((text, i) => ({
+      type: "text", text,
+      ...(anthropic && (i === previousEnd || i === snapshot.length - 1)
+        ? { providerOptions: cacheOptions } : {}),
+    }));
+    const t0 = Date.now();
+    const result = await generateText({
+      model,
+      instructions: {
+        role: "system", content: instructions,
+        ...(anthropic ? { providerOptions: cacheOptions } : {}),
+      },
+      messages: [{ role: "user", content }],
+      maxOutputTokens: config.maxOutputTokens,
+    });
+    const { inputTokens, inputTokenDetails } = result.usage;
+    debug(`response in ${Date.now() - t0}ms | tokens: ${inputTokens ?? "?"} in, ${inputTokenDetails.cacheReadTokens ?? "?"} cached`);
+    if (result.finishReason !== "stop") {
+      throw new Error(`Generation did not complete: ${result.finishReason}`);
+    }
+    previous = { instructions, blocks: snapshot };
+    return result.text;
+  };
 }

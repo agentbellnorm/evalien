@@ -1,14 +1,8 @@
-import { inspect } from "node:util";
+import { writeStderr } from "./output.mts";
 
 export function toError(value: unknown): Error {
   if (value instanceof Error) return value;
   return new Error(String(value));
-}
-
-export function fmt(val: unknown): string {
-  return typeof val === "string"
-    ? val
-    : inspect(val, { depth: 4, colors: false });
 }
 
 // ANSI color helpers
@@ -37,7 +31,7 @@ export const SYMBOL = {
 } as const;
 
 export function debug(msg: string): void {
-  process.stderr.write(
+  writeStderr(
     color.dim(`[${new Date().toISOString().slice(11, 19)}] ${msg}`) + "\n",
   );
 }

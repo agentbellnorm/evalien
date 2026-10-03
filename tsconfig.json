@@ -1,12 +1,12 @@
 {
   "compilerOptions": {
     "strict": true,
-    "target": "es2022",
+    "target": "es2024",
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.mts"]
+  "include": ["src/**/*.mts", "test/**/*.mts"]
 }
