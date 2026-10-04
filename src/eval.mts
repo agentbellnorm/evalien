@@ -27,16 +27,20 @@ export function createContext(
   };
 }
 
+/** Parse without running. A SyntaxError here means the model's source was malformed. */
+export function compile(code: string): (ctx: Record<string, unknown>) => Promise<unknown> {
+  return new Function(
+    "__ctx",
+    `with(__ctx) { return (async () => { ${code} })() }`,
+  ) as (ctx: Record<string, unknown>) => Promise<unknown>;
+}
+
 export async function evalCode(
   ctx: Record<string, unknown>,
   code: string,
 ): Promise<EvalResult> {
   try {
-    const fn = new Function(
-      "__ctx",
-      `with(__ctx) { return (async () => { ${code} })() }`,
-    );
-    const result = await fn(ctx);
+    const result = await compile(code)(ctx);
     return { result, error: null };
   } catch (err) {
     const e = toError(err);

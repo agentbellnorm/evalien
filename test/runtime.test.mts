@@ -18,11 +18,11 @@ async function until(condition: () => boolean): Promise<void> {
   }
 }
 
-async function startRuntime(t: TestContext) {
+async function startRuntime(t: TestContext, idleDelays?: number[]) {
   const dir = mkdtempSync(join(tmpdir(), "evalien-runtime-"));
   const dbPath = join(dir, "state.db");
   const requests: GenerateInput[] = [];
-  const child = fork(fileURLToPath(new URL("fixtures/runtime.mts", import.meta.url)), [dbPath], {
+  const child = fork(fileURLToPath(new URL("fixtures/runtime.mts", import.meta.url)), [dbPath, ...(idleDelays ? [JSON.stringify(idleDelays)] : [])], {
     execArgv: ["--experimental-strip-types"],
     env: { NODE_NO_WARNINGS: "1" },
     stdio: ["pipe", "pipe", "pipe", "ipc"],
@@ -69,7 +69,7 @@ test("every completion, including undefined, continues with a stable chronologic
     'console.log("sync"); console.error("warning"); process.stdout.write("raw\\n"); return 7n;',
     "void 0",
     'return "undefined";',
-    "",
+    "return;",
   ];
   for (const [index, code] of codes.entries()) {
     runtime.respond(index, code);
@@ -127,24 +127,88 @@ test("syntax errors and rejected evaluations each produce a result and continue 
   assert.equal(results[2].text, "Error: async failure");
 });
 
-test("evaluated code controls waiting while output and input accumulate", { timeout: 10_000 }, async (t) => {
+test("human input reaches the model while an earlier evaluation is still running", { timeout: 10_000 }, async (t) => {
   const runtime = await startRuntime(t);
   runtime.respond(0, `
     setTimeout(() => console.log("later"), 20);
     console.log("waiting");
     await new Promise(resolve => process.stdin.once("data", resolve));
+    return "resumed";
   `);
+  // Output from a pending evaluation doesn't request inference by itself.
   await until(() => runtime.read().some(({ event }) => event.type === "stdout" && event.text === "later\n"));
-  runtime.child.send({ type: "input", text: "hello while waiting\n" });
-  await until(() => runtime.read().some(({ event }) => event.type === "stdin"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(runtime.requests.length, 1);
-  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "eval", "stdout", "stdout", "stdin"]);
 
-  runtime.child.stdin!.write("resume\n");
+  runtime.child.send({ type: "input", text: "hello while waiting\n" });
   await until(() => runtime.requests.length === 2);
+  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "eval", "stdout", "stdout", "stdin"]);
+  assert.deepEqual(runtime.requests[1].blocks, runtime.read().map(renderEntry));
+
+  // A second evaluation runs and settles while the first is still waiting.
+  runtime.respond(1, 'return "second";');
+  await until(() => runtime.requests.length === 3);
+  // The first evaluation settles during the third model call; that call's
+  // prompt doesn't include it, the next one does.
+  runtime.child.stdin!.write("resume\n");
+  await until(() => runtime.read().length === 8);
+  assert.deepEqual(runtime.requests[2].blocks, runtime.read().slice(0, 7).map(renderEntry));
+  runtime.respond(2, "void 0");
+  await until(() => runtime.requests.length === 4);
   const entries = runtime.read();
-  assert.deepEqual(entries.at(-1)?.event, { type: "result", evalId: 2, outcome: "return", text: "undefined" });
-  assert.deepEqual(runtime.requests[1].blocks, entries.map(renderEntry));
+  assert.deepEqual(entries.map(({ event }) => event.type), [
+    "start", "eval", "stdout", "stdout", "stdin", "eval", "result", "result", "eval", "result",
+  ]);
+  assert.deepEqual(entries[6].event, { type: "result", evalId: 6, outcome: "return", text: "'second'" });
+  assert.deepEqual(entries[7].event, { type: "result", evalId: 2, outcome: "return", text: "'resumed'" });
+  assert.deepEqual(runtime.requests[3].blocks, entries.map(renderEntry));
+});
+
+test("quiet model calls are spaced out, and human input ends the wait", { timeout: 10_000 }, async (t) => {
+  const runtime = await startRuntime(t, [0, 400]);
+  const at: number[] = [Date.now()];
+  runtime.respond(0, "void 0");
+  await until(() => runtime.requests.length === 2);
+  at.push(Date.now());
+  runtime.respond(1, "void 0");
+  await until(() => runtime.requests.length === 3);
+  at.push(Date.now());
+  // First quiet call immediate, second at least 400ms after the previous call.
+  assert.ok(at[1] - at[0] < 300, `first quiet call took ${at[1] - at[0]}ms`);
+  assert.ok(at[2] - at[1] >= 350, `second quiet call came after ${at[2] - at[1]}ms`);
+
+  runtime.respond(2, "void 0");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(runtime.requests.length, 3);
+  const sent = Date.now();
+  runtime.child.send({ type: "input", text: "hurry\n" });
+  await until(() => runtime.requests.length === 4);
+  assert.ok(Date.now() - sent < 300, `input waited ${Date.now() - sent}ms`);
+  assert.equal(runtime.requests[3].blocks.at(-1), renderEntry(runtime.read().at(-1)!));
+  assert.equal(runtime.read().at(-1)!.event.type, "stdin");
+});
+
+test("empty code ends the turn until something happens", { timeout: 10_000 }, async (t) => {
+  const runtime = await startRuntime(t);
+  runtime.respond(0, "  \n");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Nothing evaluated, nothing recorded, no further call.
+  assert.equal(runtime.requests.length, 1);
+  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start"]);
+
+  runtime.child.send({ type: "input", text: "wake up\n" });
+  await until(() => runtime.requests.length === 2);
+  assert.deepEqual(runtime.requests[1].blocks, runtime.read().map(renderEntry));
+
+  // An idle agent with a background watcher is woken by its output.
+  runtime.respond(1, 'process.stdin.once("data", () => console.log("alert"));');
+  await until(() => runtime.requests.length === 3);
+  runtime.respond(2, "");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(runtime.requests.length, 3);
+  runtime.child.stdin!.write("trigger\n");
+  await until(() => runtime.requests.length === 4);
+  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "stdin", "eval", "result", "stdout"]);
 });
 
 test("asynchronous output arriving during generation is included in the following prompt", { timeout: 10_000 }, async (t) => {

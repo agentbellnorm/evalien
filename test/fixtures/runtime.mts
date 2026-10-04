@@ -27,7 +27,8 @@ process.on("message", (message: Message) => {
 });
 
 try {
-  await runRuntime({ db, input, generate, instructions: "Runtime test instructions" });
+  const idleDelays = process.argv[3] ? JSON.parse(process.argv[3]) as number[] : [];
+  await runRuntime({ db, input, generate, instructions: "Runtime test instructions", idleDelays });
 } finally {
   db.close();
 }

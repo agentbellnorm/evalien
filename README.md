@@ -10,12 +10,14 @@ There is no scheduler. The agent is a native participant in the Node.js event lo
 
 1. **Startup** → a `start` event begins inference
 2. **Eval result** → every completion, including `undefined` and exceptions, continues inference
-3. **User input** → a readline event appends `stdin`
-4. **Runtime output** → stdout/stderr writes, including asynchronous callbacks, append observations
+3. **User input** → a readline event appends `stdin`, which continues inference even while evaluations are running
+4. **Runtime output** → stdout/stderr writes, including asynchronous callbacks, append observations; they continue inference when no evaluation is pending
 
-All observations enter the trajectory immediately. One async consumer follows it by sequence number: wait for new entries, snapshot the trajectory, generate code, and evaluate it. Every event except submitted `eval` source triggers inference. Only one model request/evaluation runs at a time. Observations arriving during either are retained for the next request. Closing human stdin leaves the process's other work running.
+All observations enter the trajectory immediately. One async consumer follows it by sequence number: wait for new entries, snapshot the trajectory, generate code, and start evaluating it. Evaluation doesn't block the consumer. Each result is appended whenever its evaluation settles, so several evaluations can be in flight and settle in any order. Output from a pending evaluation doesn't request inference by itself; it's seen with the next result or input. Code that settles without I/O reports its result before the consumer decides again. Only one model request runs at a time. Observations arriving during it are retained for the next request. Closing human stdin leaves the process's other work running.
 
-The model emits JavaScript source directly. The current evaluator runs an async function body: use `return` to inspect a value and `globalThis` to retain bindings. Local declarations do not survive an evaluation. The agent controls waiting through its code; inference waits for evaluation to finish. For example:
+Calls with no human input since the previous call are paced. The first three run back to back. After that they're at least 5 seconds, 30 seconds, 2 minutes, then 10 minutes apart. Human input ends a wait and resets the pacing. An agent waiting longer in its own code isn't delayed further. Without pacing, an agent that considers itself done keeps checking in every few seconds.
+
+The model replies with a `{ "code": "..." }` object, constrained by a JSON schema where the provider supports it. Empty code ends the turn. Nothing is evaluated or recorded, and the next waking observation starts another turn: input, a result from a pending evaluation, or output while nothing is pending. Code that completes immediately asks for the next step right away, so idling is an empty reply, not a returned status. The source is evaluated as an async function body: use `return` to inspect a value and `globalThis` to retain bindings. Local declarations do not survive an evaluation. The agent controls waiting through its code, and a human can still reach it while that code waits. For example:
 
 ```js
 globalThis.checks = (globalThis.checks ?? 0) + 1;
@@ -41,7 +43,7 @@ The trajectory library validates a discriminated union, serializes events as ver
 
 `trajectory.waitAfter(seq)` returns the latest sequence if newer entries already exist, or waits for `append()` on that trajectory instance. Each consumer owns its cursor; reads leave the log intact. This connects event producers to inference without polling or a separate event queue. Arrivals during generation or evaluation are already in the log when the consumer resumes.
 
-The runtime renders each entry as a stable text block for generation. A request reads through a fixed sequence number. The recent context window advances in 200-event steps, keeping roughly 500–700 events; moving its beginning establishes a new cache prefix. Older events remain queryable with `db`:
+The runtime renders each entry as a stable text block for generation. A request reads through a fixed sequence number. The recent context window advances in 200-event steps, keeping roughly 500–700 events; moving its beginning establishes a new cache prefix. Entry bodies over 8,000 characters render as head and tail with a pointer to the full event, and the window drops older entries if it would exceed 400,000 characters, so output floods can't inflate the cost of each call. Older events remain queryable with `db`:
 
 ```js
 return db.prepare("SELECT seq, timestamp, event FROM trajectory ORDER BY seq DESC LIMIT 10").all();
@@ -54,7 +56,7 @@ The database can also hold the agent's own tables. History and saved data surviv
 ## Running
 
 ```
-# Requires Node.js 22 or newer.
+# Requires Node.js 24 or newer.
 cp .env.example .env  # select a model and fill in its API key
 npm install
 
@@ -78,11 +80,11 @@ Set `MODEL=provider/model-id` in `.env`. Only the selected provider's API key is
 
 | Provider | Example `MODEL` | API key variable |
 | --- | --- | --- |
-| Anthropic | `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-5-5` | `ANTHROPIC_API_KEY` |
 | OpenAI | `openai/gpt-5.4` | `OPENAI_API_KEY` |
 | Google Gemini | `google/gemini-2.5-flash` | `GOOGLE_GENERATIVE_AI_API_KEY` |
 
-Use any model ID supported by the selected provider and your account. The default is `anthropic/claude-sonnet-4-6`. `MODEL_MAX_OUTPUT_TOKENS` sets the generation budget (default `4096`); `MODEL_BASE_URL` optionally overrides the provider's API base URL. OpenAI uses the Responses API. These are direct API-key integrations.
+Use any model ID supported by the selected provider and your account. The default is `anthropic/claude-sonnet-5-5`. `MODEL_MAX_OUTPUT_TOKENS` sets the generation budget (default `4096`); `MODEL_BASE_URL` optionally overrides the provider's API base URL. OpenAI uses the Responses API. These are direct API-key integrations.
 
 Provider/model selection happens once at startup. Credentials and configuration are captured before environment variables are cleared. Switching providers changes configuration only.
 
@@ -95,9 +97,24 @@ type Generate = (input: {
 }) => Promise<string>;
 ```
 
-`src/llm.mts` implements it using AI SDK Core and the direct OpenAI, Anthropic, and Google providers. SDK types, API settings, usage reporting, and cache state stay inside that adapter. It returns completed source; truncated or otherwise unsuccessful generation throws before evaluation. Runtime tests inject this function directly.
+`src/llm.mts` implements it using AI SDK Core and the direct OpenAI, Anthropic, and Google providers. SDK types, API settings, usage reporting, and cache state stay inside that adapter. It requests a `{ code }` object through the provider's native structured output (`output_config.format` for Anthropic, `json_schema` text format for OpenAI, `responseJsonSchema` for Gemini), so replies can't be markup or fenced prose. It returns completed source. Truncated, unparseable, or otherwise unsuccessful generation throws before evaluation, after its usage is reported. Runtime tests inject this function directly.
 
 For Anthropic, the adapter sets cache breakpoints on the instructions, the previous unchanged prompt boundary, and the newest block. OpenAI and Gemini use their default implicit prefix caching on supported models. The stored trajectory contains no provider-specific cache settings.
+
+## Cost and run reports
+
+Every billed model response, including a rejected truncated one, is logged to the `generations` table in the same database: the trajectory seq its prompt ran through, latency, finish reason, uncached/cached/written input tokens, output and reasoning tokens, and cost. `MODEL_BUDGET_USD` (default `1`) caps spend per process. Once it's reached, the runtime makes no further model calls and exits with status 2. The call that crosses the limit still completes. Spend is counted in memory, so evaluated code editing the table doesn't reset it. Rates are built in for `anthropic/claude-sonnet-5-5` and `anthropic/claude-opus-5-5`. Other models need `MODEL_PRICING=input,output[,cacheRead,cacheWrite]` in USD per million tokens, and startup fails without it.
+
+```
+npm run report                      # ./agent.db: summary and quality checks
+npm run report -- --timeline --last # the latest run, with model calls interleaved
+npm run report:docker -- --timeline # the podman volume (uses the last built image)
+```
+
+The report exits 1 when a check fails:
+- **Model output parses as JavaScript.** At most 5% of evaluations may be source that fails to compile, such as tool-call markup or markdown fences. Exceptions thrown at runtime don't count.
+- **Human input reaches the model promptly.** Every stdin line is in a prompt within 60 seconds.
+- **Prompt cache is reused.** With at least 3 calls, at least 50% of input tokens are cache reads.
 
 ## Docker isolation
 
@@ -111,13 +128,15 @@ The container runs with:
 ## Files
 
 - `src/main.mts` — configuration and startup
-- `src/runtime.mts` — event producers and the sequential trajectory consumer
+- `src/runtime.mts` — event producers, the trajectory consumer, concurrent evaluation, and pacing
 - `src/generation.mts` — provider-independent generation contract
 - `src/system-prompt.mts` — the agent's system prompt
 - `src/trajectory.mts` — event types, validated JSON codecs, deterministic rendering
 - `src/trajectory-store.mts` — SQLite append, bounded reads, and cursor subscriptions
 - `src/output.mts` — stdout/stderr capture and separate host writers
 - `src/llm.mts` — AI SDK adapter, provider configuration, and prompt caching
+- `src/meter.mts` — model-call log, pricing, and spend budget
+- `src/report.mts` — run summary, timeline, and quality checks
 - `src/eval.mts` — JavaScript evaluation
 - `src/util.mts` — error handling and terminal formatting
 - `test/` — codec, persistence, rendering, stream capture, and runtime integration tests

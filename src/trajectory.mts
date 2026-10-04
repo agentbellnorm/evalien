@@ -92,6 +92,15 @@ export function deserializeEvent(json: string): TrajectoryEvent {
   return parseEvent(envelope.event);
 }
 
+/** Larger bodies keep their head and tail; the full text stays in the database. */
+export const MAX_ENTRY_CHARS = 8_000;
+
+function clip(seq: number, body: string): string {
+  if (body.length <= MAX_ENTRY_CHARS) return body;
+  const half = MAX_ENTRY_CHARS / 2;
+  return `${body.slice(0, half)}\n… ${body.length - MAX_ENTRY_CHARS} characters omitted; full event: SELECT event FROM trajectory WHERE seq = ${seq} …\n${body.slice(-half)}`;
+}
+
 /** Each entry renders independently, so appending preserves the existing text. */
 export function renderEntry({ seq, timestamp, event }: Entry): string {
   let label: string = event.type;
@@ -117,7 +126,7 @@ export function renderEntry({ seq, timestamp, event }: Entry): string {
       throw new TypeError(`Unknown trajectory event: ${exhaustive}`);
     }
   }
-  return `[${seq} ${timestamp} ${label}]\n${body.split("\n").map((line) => `| ${line}`).join("\n")}\n\n`;
+  return `[${seq} ${timestamp} ${label}]\n${clip(seq, body).split("\n").map((line) => `| ${line}`).join("\n")}\n\n`;
 }
 
 export function renderTrajectory(entries: readonly Entry[]): string {
