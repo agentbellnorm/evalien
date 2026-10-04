@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GenerationError, type Generate, type Usage } from "../src/contracts.mts";
+import { GenerationError, type Generate, type Generation, type Usage } from "../src/contracts.mts";
 import { MAX_ENTRY_CHARS, MAX_PROMPT_CHARS, promptWindow, renderEntry } from "../src/harness/context.mts";
 import { BudgetExceededError, withBudget } from "../src/inference/budget.mts";
 import { costOf } from "../src/inference/pricing.mts";
 import { createTrajectory } from "../src/trajectory/log.mts";
-import { createMemoryStore } from "../src/trajectory/memory-store.mts";
+import { createMemoryStore } from "../src/db/memory-store.mts";
 
 const pricing = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
 const tokens = { uncachedInputTokens: 1_000, cacheReadTokens: 10_000, cacheWriteTokens: 2_000, outputTokens: 500, reasoningTokens: 100 };
 const usage = (costUSD: number): Usage => ({ ...tokens, costUSD });
-const generation = (costUSD: number) => ({ model: "test", latencyMs: 1, finishReason: "stop", usage: usage(costUSD) });
+const generation = (costUSD: number): Generation => ({ model: "test", latencyMs: 1, finishReason: "stop", usage: usage(costUSD) });
 
 test("cost prices each token class at its own rate", () => {
   // 1k × $2 + 10k × $0.20 + 2k × $2.50 + 500 × $10, per million.

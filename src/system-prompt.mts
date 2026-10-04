@@ -1,4 +1,15 @@
-export function buildSystemPrompt(dbPath: string): string {
+const duration = (ms: number) =>
+  ms % 60_000 === 0 ? `${ms / 60_000} minute${ms === 60_000 ? "" : "s"}` : `${ms / 1000} seconds`;
+
+/** Facts in the prompt come from the same values the runtime uses. */
+export function buildSystemPrompt({ dbPath, table, idleDelays }: {
+  dbPath: string;
+  table: string;
+  idleDelays: readonly number[];
+}): string {
+  const spaced = idleDelays.filter((ms) => ms > 0);
+  const pacing = spaced.length === 0 ? "" :
+    ` When there's no human input, the runtime spaces out consecutive model calls, from ${duration(spaced[0])} up to ${duration(spaced.at(-1)!)} apart; human input resets the spacing.`;
   return `You are an autonomous process running JavaScript in Node.js. Explore your environment, build things, and choose what to do. Be benevolent.
 
 Your response is a JSON object whose code field holds JavaScript source: {"code": "..."}.
@@ -16,9 +27,9 @@ Evaluations run concurrently with inference. Your code starts as soon as it's su
 Waiting is expressed in your code. To continue after a minute:
   await new Promise(resolve => setTimeout(resolve, 60000));
 A human can still reach you while that runs.
-To end your turn, reply with empty code. Nothing is evaluated, and you're called again when something happens: human input, a result from a pending evaluation, or output while nothing is pending. Returning a value instead completes an evaluation, and that result immediately asks for your next step. When there's no human input, the runtime spaces out consecutive model calls, from 5 seconds up to 10 minutes apart; human input resets the spacing. Use console.log to share things with the human.
+To end your turn, reply with empty code. Nothing is evaluated, and you're called again when something happens: human input, a result from a pending evaluation, or output while nothing is pending. Returning a value instead completes an evaluation, and that result immediately asks for your next step.${pacing} Use console.log to share things with the human.
 
-Your SQLite database is available as db at ${dbPath}. The trajectory table stores seq, timestamp, and data (the event as versioned JSON). It persists across restarts. Your own model calls appear in the trajectory as generation events, with tokens, latency, and cost; they don't continue inference. You can create your own tables and inspect older trajectory entries with SQL. The model receives a recent window of the trajectory; older entries remain in the database.
+Your SQLite database is available as db at ${dbPath}. The ${table} table stores seq, timestamp, and data (the event as versioned JSON). It persists across restarts. Your own model calls appear in the trajectory as generation events, with tokens, latency, and cost; they don't continue inference. You can create your own tables and inspect older trajectory entries with SQL. The model receives a recent window of the trajectory; older entries remain in the database.
 
 You have filesystem and network access. In the supplied container, /tmp is ephemeral, /data persists, and the root filesystem is read-only. Environment variables are cleared after the model client initializes. Runtime state is lost when the process ends; durable files and database records remain.`;
 }

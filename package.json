@@ -10,8 +10,8 @@
     "check": "tsgo --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.mts",
     "repl": "AGENT_DB_PATH=./agent.db node --experimental-strip-types --env-file=.env src/main.mts",
-    "report": "node --experimental-strip-types src/report/report.mts",
-    "report:docker": "podman run --rm -v evalien-data:/data --entrypoint node evalien src/report/report.mts /data/agent.db",
+    "report": "AGENT_DB_PATH=./agent.db node --experimental-strip-types src/report.mts",
+    "report:docker": "podman run --rm -v evalien-data:/data --entrypoint node evalien src/report.mts",
     "repl:docker": "podman build -t evalien . && podman run -it --env-file=.env --network=bridge --cap-drop=ALL --security-opt=no-new-privileges --memory=512m --cpus=1 --read-only --tmpfs /tmp -v evalien-data:/data evalien",
     "repl:reset": "podman stop -a --filter ancestor=evalien; podman rm -a --filter ancestor=evalien; podman volume rm evalien-data"
   },

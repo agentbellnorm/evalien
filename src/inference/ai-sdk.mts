@@ -2,7 +2,7 @@ import { generateText, jsonSchema, NoObjectGeneratedError, Output, type Language
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogle } from "@ai-sdk/google";
-import { GenerationError, type Generate, type GenerateInput, type Generation } from "../contracts.mts";
+import { GenerationError, type FinishReason, type Generate, type GenerateInput, type Generation } from "../contracts.mts";
 import type { ModelConfig, Provider } from "./config.mts";
 import { costOf } from "./pricing.mts";
 
@@ -50,7 +50,7 @@ export function createGenerate(
         ? { providerOptions: cacheOptions } : {}),
     }));
     const t0 = Date.now();
-    const describe = (usage: LanguageModelUsage, finishReason: string): Generation => {
+    const describe = (usage: LanguageModelUsage, finishReason: FinishReason): Generation => {
       const { inputTokens, inputTokenDetails, outputTokens, outputTokenDetails } = usage;
       const cacheReadTokens = inputTokenDetails.cacheReadTokens ?? 0;
       const cacheWriteTokens = inputTokenDetails.cacheWriteTokens ?? 0;

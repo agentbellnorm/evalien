@@ -18,13 +18,14 @@ const files = readdirSync(src, { recursive: true, encoding: "utf8" })
     };
   });
 
-/** Composition: may wire anything together. */
-const composition = new Set(["main.mts", "config.mts", "system-prompt.mts"]);
+/** Top-level files are composition: entry points and what they share. Folders are modules. */
+const isComposition = (file: string) => !file.includes("/") && file !== "contracts.mts";
 const moduleOf = (file: string) => (file.includes("/") ? file.split("/")[0] : file);
 
 test("the scan sees every module", () => {
   assert.deepEqual([...new Set(files.map(({ file }) => moduleOf(file)))].sort(), [
-    "config.mts", "contracts.mts", "db", "evaluation", "harness", "inference", "main.mts", "report", "system-prompt.mts", "terminal", "trajectory",
+    "config.mts", "contracts.mts", "db", "evaluation", "harness", "inference", "lifecycle", "main.mts", "quality", "report.mts",
+    "system-prompt.mts", "terminal", "trajectory",
   ]);
 });
 
@@ -35,7 +36,7 @@ test("contracts depend on nothing", () => {
 
 test("modules know only the contracts and their own folder", () => {
   const violations = files
-    .filter(({ file }) => !composition.has(file) && moduleOf(file) !== "report" && file !== "contracts.mts")
+    .filter(({ file }) => !isComposition(file) && file !== "contracts.mts")
     .flatMap(({ file, local }) => local
       .filter((target) => target !== "contracts.mts" && moduleOf(target) !== moduleOf(file))
       .map((target) => `${file} imports ${target}`));
@@ -44,7 +45,7 @@ test("modules know only the contracts and their own folder", () => {
 
 test("libraries stay inside the module that adapts them", () => {
   const owners: Record<string, string[]> = {
-    "node:sqlite": ["db", "main.mts", "report"],
+    "node:sqlite": ["db"],
     "node:readline": ["terminal"],
     "ai": ["inference"],
     "@ai-sdk/anthropic": ["inference"],

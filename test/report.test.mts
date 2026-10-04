@@ -8,8 +8,12 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import type { TrajectoryEvent } from "../src/contracts.mts";
 import { createSqliteStore } from "../src/db/sqlite-store.mts";
-import { analyze, readRun } from "../src/report/report.mts";
+import { parses } from "../src/evaluation/node-eval.mts";
+import { analyze as analyzeWith } from "../src/quality/analyze.mts";
 import { createTrajectory } from "../src/trajectory/log.mts";
+
+const readRun = (db: DatabaseSync) => createTrajectory(createSqliteStore(db, "trajectory")).read();
+const analyze = (entries: ReturnType<typeof readRun>) => analyzeWith(entries, { parses });
 
 // 100 × $2 + 900 × $0.20 + 50 × $10 per million is $0.00088 per call.
 const usage = { uncachedInputTokens: 100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 50, reasoningTokens: 0, costUSD: 0.00088 };
@@ -86,7 +90,7 @@ test("--last scopes the report to the latest start, and failures exit nonzero", 
       { type: "start" }, "generate", { type: "eval", code: "return 2;" }, result("return", "2"),
     ]);
     db.close();
-    const cli = fileURLToPath(new URL("../src/report/report.mts", import.meta.url));
+    const cli = fileURLToPath(new URL("../src/report.mts", import.meta.url));
     const run = (...args: string[]) => {
       try {
         return { code: 0, out: execFileSync(process.execPath, ["--no-warnings", cli, path, ...args], { encoding: "utf8" }) };

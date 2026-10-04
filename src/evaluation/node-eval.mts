@@ -15,6 +15,17 @@ export function compile(code: string): (ctx: Record<string, unknown>) => Promise
   ) as (ctx: Record<string, unknown>) => Promise<unknown>;
 }
 
+/** Whether source compiles. Exceptions it would throw at runtime don't count. */
+export function parses(code: string): boolean {
+  try {
+    compile(code);
+    return true;
+  } catch (err) {
+    if (err instanceof SyntaxError) return false;
+    throw err;
+  }
+}
+
 /**
  * Evaluates source as an async function body in this process. The context
  * object persists, so code can share state through it and globalThis.

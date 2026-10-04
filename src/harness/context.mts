@@ -52,17 +52,21 @@ export function renderTrajectory(entries: readonly Entry[]): string {
 
 /** Bounds input cost per call, even when evaluated code floods output. */
 export const MAX_PROMPT_CHARS = 400_000;
+/** At least this many recent events, until the window's start moves a step. */
+const WINDOW_EVENTS = 500;
+/** The window's start moves in steps of this many events, so prompts share a cached prefix. */
+const WINDOW_STEP = 200;
 
 /**
  * A recent window whose start moves in fixed steps, so consecutive prompts
  * share a prefix. Only an oversized window drops older entries beyond that.
  */
 export function promptWindow(log: EventLog, through: number): string[] {
-  let after = Math.floor(Math.max(0, through - 500) / 200) * 200;
+  let after = Math.floor(Math.max(0, through - WINDOW_EVENTS) / WINDOW_STEP) * WINDOW_STEP;
   let blocks = log.read(after, through).map(renderEntry);
   const size = () => blocks.reduce((total, block) => total + block.length, 0);
-  while (after + 200 < through && size() > MAX_PROMPT_CHARS) {
-    after += 200;
+  while (after + WINDOW_STEP < through && size() > MAX_PROMPT_CHARS) {
+    after += WINDOW_STEP;
     blocks = log.read(after, through).map(renderEntry);
   }
   while (blocks.length > 1 && size() > MAX_PROMPT_CHARS) blocks.shift();

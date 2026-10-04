@@ -1,9 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
 import type { Entry, TrajectoryEvent } from "../contracts.mts";
-import { createSqliteStore } from "../db/sqlite-store.mts";
-import { compile } from "../evaluation/node-eval.mts";
-import { renderTrajectory } from "../harness/context.mts";
-import { createTrajectory } from "../trajectory/log.mts";
 
 /** Quality bars for a run. A failing check exits nonzero. */
 export const THRESHOLDS = {
@@ -29,27 +24,16 @@ export interface Report {
   checks: Check[];
 }
 
-export function readRun(db: DatabaseSync, lastRunOnly = false): Entry[] {
-  const entries = createTrajectory(createSqliteStore(db, "trajectory")).read();
-  if (!lastRunOnly) return entries;
-  const start = entries.findLastIndex(({ event }) => event.type === "start");
-  return entries.slice(Math.max(0, start));
-}
-
-function parses(code: string): boolean {
-  try {
-    compile(code);
-    return true;
-  } catch (err) {
-    if (err instanceof SyntaxError) return false;
-    throw err;
-  }
+/** Entries from the latest start on. */
+export function lastRun(entries: Entry[]): Entry[] {
+  return entries.slice(Math.max(0, entries.findLastIndex(({ event }) => event.type === "start")));
 }
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
-export function analyze(entries: Entry[]): Report {
+/** Summarize a run and check it against THRESHOLDS. `parses` decides whether source is well-formed. */
+export function analyze(entries: Entry[], { parses }: { parses: (code: string) => boolean }): Report {
   const calls = entries.filter((entry): entry is Call => entry.event.type === "generation");
   const evals = entries.filter((entry) => entry.event.type === "eval");
   const malformed = evals.filter(({ event }) => event.type === "eval" && !parses(event.code));
@@ -125,25 +109,4 @@ export function renderReport(report: Report): string {
     "",
     ...report.checks.map((check) => `${check.pass ? "PASS" : "FAIL"}  ${check.name}: ${check.detail}`),
   ].join("\n") + "\n";
-}
-
-if (import.meta.main) {
-  const args = process.argv.slice(2);
-  const flags = new Set(args.filter((arg) => arg.startsWith("--")));
-  const unknown = [...flags].filter((flag) => !["--timeline", "--last"].includes(flag));
-  const paths = args.filter((arg) => !arg.startsWith("--"));
-  if (unknown.length || paths.length > 1) {
-    process.stderr.write("usage: report.mts [db] [--timeline] [--last]\n");
-    process.exit(64);
-  }
-  const db = new DatabaseSync(paths[0] ?? process.env.AGENT_DB_PATH ?? "./agent.db");
-  try {
-    const report = analyze(readRun(db, flags.has("--last")));
-    // The timeline is the trajectory as the model sees it, calls included.
-    if (flags.has("--timeline")) process.stdout.write(renderTrajectory(report.entries) + "\n");
-    process.stdout.write(renderReport(report));
-    process.exitCode = report.checks.every((check) => check.pass) ? 0 : 1;
-  } finally {
-    db.close();
-  }
 }

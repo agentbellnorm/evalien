@@ -23,11 +23,31 @@ export function wakes(event: TrajectoryEvent, pending: number): boolean {
     case "eval":
     case "generation":
       return false;
+    default: {
+      const exhaustive: never = event;
+      throw new TypeError(`Unknown trajectory event: ${String(exhaustive)}`);
+    }
   }
 }
 
 /** A fresh start or human input resets pacing. */
-export const fromHuman = (event: TrajectoryEvent) => event.type === "start" || event.type === "stdin";
+export function fromHuman(event: TrajectoryEvent): boolean {
+  switch (event.type) {
+    case "start":
+    case "stdin":
+      return true;
+    case "eval":
+    case "stdout":
+    case "stderr":
+    case "result":
+    case "generation":
+      return false;
+    default: {
+      const exhaustive: never = event;
+      throw new TypeError(`Unknown trajectory event: ${String(exhaustive)}`);
+    }
+  }
+}
 
 /** Minimum spacing before the nth consecutive call without human input. */
 export function idleDelay(quiet: number, delays: readonly number[] = IDLE_DELAYS): number {

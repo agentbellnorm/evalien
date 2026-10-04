@@ -4,8 +4,6 @@ import type { RecordStore, StoredRecord } from "../contracts.mts";
 /** Append-only records in one SQLite table. Contents are opaque strings. */
 export function createSqliteStore(db: DatabaseSync, table: string): RecordStore {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new TypeError(`Invalid table name: ${table}`);
-  // Let observers read while the runtime appends.
-  db.exec("PRAGMA busy_timeout = 1000; PRAGMA journal_mode = WAL;");
   db.exec(`CREATE TABLE IF NOT EXISTS ${table} (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,

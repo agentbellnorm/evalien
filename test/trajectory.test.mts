@@ -9,7 +9,7 @@ import { createSqliteStore } from "../src/db/sqlite-store.mts";
 import { renderEntry, renderTrajectory } from "../src/harness/context.mts";
 import { deserializeEvent, serializeEvent } from "../src/trajectory/codec.mts";
 import { createTrajectory } from "../src/trajectory/log.mts";
-import { createMemoryStore } from "../src/trajectory/memory-store.mts";
+import { createMemoryStore } from "../src/db/memory-store.mts";
 
 const initTrajectory = (db: DatabaseSync) => createTrajectory(createSqliteStore(db, "trajectory"));
 
@@ -54,6 +54,10 @@ test("deserialization rejects corrupt, unknown, and incomplete records", () => {
       { type: "result", evalId: 2, outcome: "return" },
       { type: "result", evalId: 2, outcome: "timeout", text: "x" },
       { type: "generation", through: 1, model: "m", latencyMs: 1, finishReason: "stop" },
+      {
+        type: "generation", through: 1, model: "m", latencyMs: 1, finishReason: "done",
+        usage: { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, costUSD: 0 },
+      },
       ...[{ costUSD: -1 }, { costUSD: NaN }, { outputTokens: 1.5 }, { cacheReadTokens: "3" }].map((bad) => ({
         type: "generation", through: 1, model: "m", latencyMs: 1, finishReason: "stop",
         usage: { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, costUSD: 0, ...bad },

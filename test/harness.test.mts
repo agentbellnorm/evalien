@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  GenerationError, type Evaluation, type Generate, type GenerateInput, type InputSource, type OutputSource,
+  GenerationError, type Evaluation, type Generation, type Generate, type GenerateInput, type InputSource, type OutputSource,
 } from "../src/contracts.mts";
 import { renderEntry } from "../src/harness/context.mts";
 import { runRuntime } from "../src/harness/runtime.mts";
 import { createTrajectory } from "../src/trajectory/log.mts";
-import { createMemoryStore } from "../src/trajectory/memory-store.mts";
+import { createMemoryStore } from "../src/db/memory-store.mts";
 
 const usage = { uncachedInputTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 3, outputTokens: 4, reasoningTokens: 0, costUSD: 0.001 };
-const generation = { model: "test/model", latencyMs: 5, finishReason: "stop", usage };
+const generation: Generation = { model: "test/model", latencyMs: 5, finishReason: "stop", usage };
 
 async function until(condition: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;

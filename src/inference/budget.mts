@@ -14,7 +14,7 @@ export function withBudget(generate: Generate, budgetUSD: number): { generate: G
   return {
     async generate(input) {
       if (spent >= budgetUSD) {
-        throw new BudgetExceededError(`Spent $${spent.toFixed(4)} of the $${budgetUSD.toFixed(2)} MODEL_BUDGET_USD for this process`);
+        throw new BudgetExceededError(`Spent $${spent.toFixed(4)} of this process's $${budgetUSD.toFixed(2)} budget`);
       }
       try {
         const result = await generate(input);

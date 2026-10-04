@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { captureOutput, writeStdout, writeStderr } from "../src/terminal/capture.mts";
 import { createTrajectory } from "../src/trajectory/log.mts";
-import { createMemoryStore } from "../src/trajectory/memory-store.mts";
+import { createMemoryStore } from "../src/db/memory-store.mts";
 import { createEvaluator } from "../src/evaluation/node-eval.mts";
 import { showTrajectory } from "../src/terminal/display.mts";
 import type { OutputEvent } from "../src/contracts.mts";
@@ -18,7 +18,7 @@ function isolated(check: () => void | Promise<void>): void {
     import { DatabaseSync } from 'node:sqlite';
     import { captureOutput, writeStdout, writeStderr } from './src/terminal/capture.mts';
     import { createTrajectory } from './src/trajectory/log.mts';
-    import { createMemoryStore } from './src/trajectory/memory-store.mts';
+    import { createMemoryStore } from './src/db/memory-store.mts';
     import { createEvaluator } from './src/evaluation/node-eval.mts';
     await (${check.toString()})();
   `], { cwd: fileURLToPath(new URL("../", import.meta.url)), stdio: "pipe" });
@@ -121,6 +121,7 @@ test("display prints input, source, results and calls, but not output that alrea
   stop();
   trajectory.append({ type: "stdin", text: "unseen" });
   assert.deepEqual(shown, [
+    "out:evalien -- agent is waking up (0 prior events)...\n\n",
     "out:[you] hi\n", "out:\u26a1 return 1\n", "out:\u2192 1\n", "err:\u2718 Error: boom\n",
     "note:anthropic/test 12ms stop | 110 in, 100 cached, 9 out, $0.0012",
   ]);

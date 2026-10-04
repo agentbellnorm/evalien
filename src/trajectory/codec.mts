@@ -1,4 +1,4 @@
-import type { TrajectoryEvent, Usage } from "../contracts.mts";
+import { FINISH_REASONS, type FinishReason, type TrajectoryEvent, type Usage } from "../contracts.mts";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -28,6 +28,12 @@ function count(value: unknown): number {
   return value;
 }
 
+function finishReason(value: unknown): FinishReason {
+  const reason = FINISH_REASONS.find((known) => known === value);
+  if (!reason) throw new TypeError(`Unknown finish reason: ${String(value)}`);
+  return reason;
+}
+
 function usage(value: unknown): Usage {
   const u = record(value);
   fields(u, ["uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "reasoningTokens", "costUSD"]);
@@ -46,7 +52,9 @@ function usage(value: unknown): Usage {
 
 function parseEvent(value: unknown): TrajectoryEvent {
   const event = record(value);
-  switch (event.type) {
+  // Typed so the switch is exhaustive; untrusted values still reach default.
+  const type = event.type as TrajectoryEvent["type"];
+  switch (type) {
     case "start":
       fields(event, ["type"]);
       return { type: "start" };
@@ -57,7 +65,7 @@ function parseEvent(value: unknown): TrajectoryEvent {
     case "stdout":
     case "stderr":
       fields(event, ["type", "text"]);
-      return { type: event.type, text: text(event.text) };
+      return { type, text: text(event.text) };
     case "result":
       fields(event, ["type", "evalId", "outcome", "text"]);
       if (
@@ -83,11 +91,13 @@ function parseEvent(value: unknown): TrajectoryEvent {
         through: count(event.through),
         model: text(event.model),
         latencyMs: count(event.latencyMs),
-        finishReason: text(event.finishReason),
+        finishReason: finishReason(event.finishReason),
         usage: usage(event.usage),
       };
-    default:
-      throw new TypeError(`Unknown trajectory event: ${String(event.type)}`);
+    default: {
+      const unknown: never = type;
+      throw new TypeError(`Unknown trajectory event: ${String(unknown)}`);
+    }
   }
 }
 

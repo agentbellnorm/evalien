@@ -126,19 +126,21 @@ The container runs with:
 
 ## Architecture
 
-Modules share the types in `src/contracts.mts` and never import each other. `src/main.mts` is the only place that wires implementations together. `test/boundaries.test.mts` enforces this, and checks that SQLite, readline, and the AI SDK stay inside the module that adapts them.
+Modules share the types in `src/contracts.mts` and never import each other. Folders are modules. Top-level files are composition: the entry points `src/main.mts` (the agent) and `src/report.mts` (the report), and what they share. `test/boundaries.test.mts` enforces this, and checks that SQLite, readline, and the AI SDK stay inside the module that adapts them.
 
 - `src/contracts.mts` — events, usage, and the interfaces: `RecordStore`, `EventLog`, `Generate`, `Evaluator`, `InputSource`, `OutputSource`
-- `src/db/` — an append-only SQLite record store; contents are opaque strings
-- `src/trajectory/` — the versioned event codec and the event log over any record store; a memory store for tests
+- `src/db/` — opening the database, and record stores (SQLite, and memory for tests); contents are opaque strings
+- `src/trajectory/` — the versioned event codec and the event log over any record store
 - `src/inference/` — the AI SDK adapter, provider configuration, pricing, and the spend budget
 - `src/evaluation/` — runs source as an async function body with the globals it's given
 - `src/harness/` — the runtime loop, wake rules and pacing (`policy.mts`), and rendering and the prompt window (`context.mts`)
 - `src/terminal/` — line input, stdout/stderr capture, and the display that follows the trajectory
-- `src/report/` — run summary, timeline, and quality checks
-- `src/config.mts` — everything read from the environment
-- `src/system-prompt.mts` — the agent's system prompt
-- `src/main.mts` — composition and process lifecycle
+- `src/quality/` — run summary and quality checks over trajectory entries
+- `src/lifecycle/` — taking the environment, stop signals, exit codes, and cleanup
+- `src/config.mts` — everything read from the environment, and the trajectory table name
+- `src/system-prompt.mts` — the agent's system prompt, built from the values the runtime uses
+- `src/main.mts` — the agent's composition root
+- `src/report.mts` — the report's composition root
 - `test/` — unit tests per module, in-memory harness tests, capture and signal tests in real processes
 - `Dockerfile` — hardened container image
 - `.env` — your API key (not committed)

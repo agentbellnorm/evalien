@@ -1,5 +1,5 @@
 // The shared vocabulary. Modules depend on these types, never on each other;
-// main.mts wires implementations together.
+// the top-level entry points wire implementations together.
 
 /** Observable events at the runtime boundary. Values are captured as text. */
 export type TrajectoryEvent =
@@ -29,11 +29,15 @@ export interface Usage {
   costUSD: number;
 }
 
+/** Why a model call ended. Only "stop" produced usable source. */
+export const FINISH_REASONS = ["stop", "length", "content-filter", "tool-calls", "error", "other", "unknown"] as const;
+export type FinishReason = (typeof FINISH_REASONS)[number];
+
 /** What one model call cost and how it ended. */
 export interface Generation {
   model: string;
   latencyMs: number;
-  finishReason: string;
+  finishReason: FinishReason;
   usage: Usage;
 }
 
