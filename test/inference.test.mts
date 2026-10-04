@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createGenerate, readModelConfig, type ModelConfig } from "../src/llm.mts";
-import type { GenerationReport } from "../src/meter.mts";
+import { GenerationError } from "../src/contracts.mts";
+import { createGenerate } from "../src/inference/ai-sdk.mts";
+import { readInferenceConfig as readModelConfig, type ModelConfig } from "../src/inference/config.mts";
+
+const pricing = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+const configFor = (provider: Provider, maxOutputTokens = 4096): ModelConfig =>
+  ({ provider, model: "test-model", apiKey: "test-key", maxOutputTokens, pricing });
+
+/** The GenerationError a rejected call throws. */
+async function failure(promise: Promise<unknown>, message: RegExp): Promise<GenerationError> {
+  const err = await promise.then(() => assert.fail("expected the call to fail"), (e: unknown) => e);
+  assert.ok(err instanceof GenerationError, String(err));
+  assert.match(err.message, message);
+  return err;
+}
 
 type Provider = ModelConfig["provider"];
 type Part = { text: string; cache_control?: { type: string } };
@@ -77,11 +90,11 @@ for (const provider of ["anthropic", "openai", "google"] as const) {
       MODEL_PRICING: "1,2",
     };
     const { requests, fetch } = transport(provider);
-    const generate = createGenerate(readModelConfig(env), fetch);
+    const generate = createGenerate(readModelConfig(env), { fetch });
     for (const name of Object.keys(env)) delete env[name];
     const blocks = ["first\n", "second 👽\n", "third\n"];
     const frozen = Object.freeze([...blocks]);
-    assert.equal(await generate({ instructions: "instructions", blocks: frozen }), "return 42;");
+    assert.equal((await generate({ instructions: "instructions", blocks: frozen })).code, "return 42;");
     assert.deepEqual(frozen, blocks);
     assert.equal(requests.length, 1);
     const { url, headers, body } = requests[0];
@@ -120,20 +133,16 @@ for (const provider of ["anthropic", "openai", "google"] as const) {
 
   test(`${provider}: truncated source is rejected instead of returned for execution, but its usage is still reported`, async () => {
     const { fetch } = transport(provider, [{ code: "console.log('partial');", truncated: true }]);
-    const reports: GenerationReport[] = [];
-    const generate = createGenerate(
-      { provider, model: "test-model", apiKey: "test-key", maxOutputTokens: 10 }, fetch, (report) => reports.push(report),
-    );
-    await assert.rejects(generate({ instructions: "instructions", blocks: ["context"] }), /did not complete: length/);
-    assert.equal(reports.length, 1);
-    assert.equal(reports[0].finishReason, "length");
-    assert.equal(reports[0].outputTokens, 5);
+    const generate = createGenerate(configFor(provider, 10), { fetch });
+    const { generation } = await failure(generate({ instructions: "instructions", blocks: ["context"] }), /did not complete: length/);
+    assert.equal(generation.finishReason, "length");
+    assert.equal(generation.usage.outputTokens, 5);
   });
 }
 
 test("Anthropic cache tracking stays inside the generator and handles long bursts and changed prefixes", async () => {
   const { requests, fetch } = transport("anthropic");
-  const generate = createGenerate({ provider: "anthropic", model: "test-model", apiKey: "test-key", maxOutputTokens: 4096 }, fetch);
+  const generate = createGenerate(configFor("anthropic"), { fetch });
   const first = ["A", "B"];
   const extended = [...first, ...Array.from({ length: 40 }, (_, i) => `output ${i}`)];
   await generate({ instructions: "instructions", blocks: first });
@@ -154,7 +163,7 @@ test("a failed generation does not advance the cached prefix", async () => {
   const { requests, fetch } = transport("anthropic", [
     { code: "void 0" }, { code: "partial", truncated: true }, { code: "void 0" },
   ]);
-  const generate = createGenerate({ provider: "anthropic", model: "test-model", apiKey: "test-key", maxOutputTokens: 4096 }, fetch);
+  const generate = createGenerate(configFor("anthropic"), { fetch });
   await generate({ instructions: "instructions", blocks: ["A"] });
   await assert.rejects(generate({ instructions: "instructions", blocks: ["A", "B"] }));
   await generate({ instructions: "instructions", blocks: ["A", "B", "C"] });
@@ -162,28 +171,26 @@ test("a failed generation does not advance the cached prefix", async () => {
 });
 
 test("a complete reply that isn't the source object is rejected, and its usage still reported", async () => {
-  const reports: GenerationReport[] = [];
   const fetch: typeof globalThis.fetch = async () => Response.json({
     ...response("anthropic", ""), content: [{ type: "text", text: '<invoke name="eval">' }],
   });
-  const generate = createGenerate(
-    { provider: "anthropic", model: "test-model", apiKey: "test-key", maxOutputTokens: 4096 }, fetch, (report) => reports.push(report),
-  );
-  await assert.rejects(generate({ instructions: "instructions", blocks: ["A"] }), /did not produce source/);
-  assert.deepEqual(reports.map((report) => report.finishReason), ["stop"]);
+  const generate = createGenerate(configFor("anthropic"), { fetch });
+  const { generation } = await failure(generate({ instructions: "instructions", blocks: ["A"] }), /did not produce source/);
+  assert.equal(generation.finishReason, "stop");
 });
 
-test("Anthropic usage separates uncached, cached and output tokens", async () => {
+test("Anthropic usage separates uncached, cached and output tokens and prices each class", async () => {
   const { fetch } = transport("anthropic");
-  const reports: GenerationReport[] = [];
-  const generate = createGenerate(
-    { provider: "anthropic", model: "test-model", apiKey: "test-key", maxOutputTokens: 4096 }, fetch, (report) => reports.push(report),
-  );
-  await generate({ instructions: "instructions", blocks: ["A"] });
-  assert.deepEqual(
-    [reports[0].finishReason, reports[0].uncachedInputTokens, reports[0].cacheReadTokens, reports[0].outputTokens],
-    ["stop", 20, 10, 5],
-  );
+  const generate = createGenerate(configFor("anthropic"), { fetch });
+  const { code, ...generation } = await generate({ instructions: "instructions", blocks: ["A"] });
+  assert.equal(code, "return 42;");
+  assert.equal(generation.model, "anthropic/test-model");
+  assert.equal(generation.finishReason, "stop");
+  assert.deepEqual(generation.usage, {
+    uncachedInputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 5, reasoningTokens: 0,
+    // 20 × $2 + 10 × $0.20 + 5 × $10, per million.
+    costUSD: (40 + 2 + 50) / 1e6,
+  });
 });
 
 test("model configuration validates selection and only requires the selected provider's key", () => {

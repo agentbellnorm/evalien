@@ -1,4 +1,4 @@
-import type { TrajectoryEvent } from "../contracts.mts";
+import type { TrajectoryEvent, Usage } from "../contracts.mts";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -19,6 +19,29 @@ function fields(value: Record<string, unknown>, names: string[]): void {
 function text(value: unknown): string {
   if (typeof value !== "string") throw new TypeError("Expected trajectory text");
   return value;
+}
+
+function count(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("Expected a nonnegative integer");
+  }
+  return value;
+}
+
+function usage(value: unknown): Usage {
+  const u = record(value);
+  fields(u, ["uncachedInputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "reasoningTokens", "costUSD"]);
+  if (typeof u.costUSD !== "number" || !Number.isFinite(u.costUSD) || u.costUSD < 0) {
+    throw new TypeError("Expected a nonnegative cost");
+  }
+  return {
+    uncachedInputTokens: count(u.uncachedInputTokens),
+    cacheReadTokens: count(u.cacheReadTokens),
+    cacheWriteTokens: count(u.cacheWriteTokens),
+    outputTokens: count(u.outputTokens),
+    reasoningTokens: count(u.reasoningTokens),
+    costUSD: u.costUSD,
+  };
 }
 
 function parseEvent(value: unknown): TrajectoryEvent {
@@ -52,6 +75,16 @@ function parseEvent(value: unknown): TrajectoryEvent {
         evalId: event.evalId,
         outcome: event.outcome,
         text: text(event.text),
+      };
+    case "generation":
+      fields(event, ["type", "through", "model", "latencyMs", "finishReason", "usage"]);
+      return {
+        type: "generation",
+        through: count(event.through),
+        model: text(event.model),
+        latencyMs: count(event.latencyMs),
+        finishReason: text(event.finishReason),
+        usage: usage(event.usage),
       };
     default:
       throw new TypeError(`Unknown trajectory event: ${String(event.type)}`);

@@ -31,6 +31,13 @@ export function renderEntry({ seq, timestamp, event }: Entry): string {
       label = `result eval=${event.evalId} ${event.outcome}`;
       body = event.text;
       break;
+    case "generation": {
+      const u = event.usage;
+      body = `${event.model} through=${event.through}: ${(event.latencyMs / 1000).toFixed(1)}s, ${event.finishReason}, ` +
+        `in ${u.uncachedInputTokens} + ${u.cacheReadTokens} cached + ${u.cacheWriteTokens} written, ` +
+        `out ${u.outputTokens} (${u.reasoningTokens} reasoning), $${u.costUSD.toFixed(4)}`;
+      break;
+    }
     default: {
       const exhaustive: never = event;
       throw new TypeError(`Unknown trajectory event: ${exhaustive}`);

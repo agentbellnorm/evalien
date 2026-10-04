@@ -1,26 +1,21 @@
 import { DatabaseSync } from "node:sqlite";
-import { createGenerate, readModelConfig } from "./llm.mts";
-import { BudgetExceededError, createMeter, type Meter } from "./meter.mts";
+import { createGenerate } from "./inference/ai-sdk.mts";
+import { BudgetExceededError, withBudget } from "./inference/budget.mts";
+import { readInferenceConfig } from "./inference/config.mts";
 import { writeStderr } from "./output.mts";
+import { debug } from "./util.mts";
 import { createSqliteStore } from "./db/sqlite-store.mts";
 import { runRuntime } from "./harness/runtime.mts";
 import { createTrajectory } from "./trajectory/log.mts";
 import { buildSystemPrompt } from "./system-prompt.mts";
 
 const dbPath = process.env.AGENT_DB_PATH || "/data/agent.db";
-const config = readModelConfig(process.env);
-let meter: Meter | undefined;
-const generate = createGenerate(config, undefined, (report) => meter!.record(report));
+const config = readInferenceConfig(process.env);
+const { generate } = withBudget(createGenerate(config, { warn: debug }), config.budgetUSD);
 for (const key of Object.keys(process.env)) delete process.env[key];
 
 const db = new DatabaseSync(dbPath);
 const log = createTrajectory(createSqliteStore(db, "trajectory"));
-meter = createMeter(db, {
-  model: `${config.provider}/${config.model}`,
-  pricing: config.pricing,
-  budgetUSD: config.budgetUSD,
-  position: log.lastSeq,
-});
 
 // As PID 1 in a container, the process has no default signal handling, so
 // Ctrl+C and `podman stop` only work through explicit handlers.
@@ -34,7 +29,7 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
 
 let exitCode = 0;
 try {
-  await runRuntime({ log, db, generate: meter.guard(generate), instructions: buildSystemPrompt(dbPath) });
+  await runRuntime({ log, db, generate, instructions: buildSystemPrompt(dbPath) });
 } catch (err) {
   if (!(err instanceof BudgetExceededError)) throw err;
   writeStderr(`\n${err.message}. Stopping.\n`);

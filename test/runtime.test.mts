@@ -7,8 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import type { GenerateInput } from "../src/generation.mts";
-import type { Entry } from "../src/contracts.mts";
+import type { Entry, GenerateInput } from "../src/contracts.mts";
 import { renderEntry } from "../src/harness/context.mts";
 import { deserializeEvent } from "../src/trajectory/codec.mts";
 
@@ -19,6 +18,11 @@ async function until(condition: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+// Model calls are recorded as generation events; most assertions are about the rest.
+const visible = (entries: Entry[]) => entries.filter(({ event }) => event.type !== "generation");
+/** Every entry up to the nth visible one: what a prompt through that point contains. */
+const upTo = (all: Entry[], n: number) => all.filter((e) => e.seq <= visible(all)[n - 1].seq).map(renderEntry);
 
 async function startRuntime(t: TestContext, idleDelays?: number[]) {
   const dir = mkdtempSync(join(tmpdir(), "evalien-runtime-"));
@@ -77,21 +81,22 @@ test("every completion, including undefined, continues with a stable chronologic
     runtime.respond(index, code);
     await until(() => runtime.requests.length === index + 2);
   }
-  const entries = runtime.read();
+  const all = runtime.read();
+  const entries = visible(all);
   assert.deepEqual(entries.map((entry) => entry.event.type), [
     "start", "eval", "stdout", "stderr", "stdout", "result",
     "eval", "result", "eval", "result", "eval", "result",
   ]);
-  assert.deepEqual(entries[5].event, { type: "result", evalId: 2, outcome: "return", text: "7n" });
-  assert.deepEqual(entries[7].event, { type: "result", evalId: 7, outcome: "return", text: "undefined" });
-  assert.deepEqual(entries[9].event, { type: "result", evalId: 9, outcome: "return", text: "'undefined'" });
-  assert.deepEqual(entries[11].event, { type: "result", evalId: 11, outcome: "return", text: "undefined" });
+  assert.deepEqual(entries[5].event, { type: "result", evalId: entries[1].seq, outcome: "return", text: "7n" });
+  assert.deepEqual(entries[7].event, { type: "result", evalId: entries[6].seq, outcome: "return", text: "undefined" });
+  assert.deepEqual(entries[9].event, { type: "result", evalId: entries[8].seq, outcome: "return", text: "'undefined'" });
+  assert.deepEqual(entries[11].event, { type: "result", evalId: entries[10].seq, outcome: "return", text: "undefined" });
 
   for (const [index, through] of [1, 6, 8, 10, 12].entries()) {
     const request = runtime.requests[index];
     assert.deepEqual(Object.keys(request), ["instructions", "blocks"]);
     assert.equal(request.instructions, "Runtime test instructions");
-    assert.deepEqual(request.blocks, entries.slice(0, through).map(renderEntry));
+    assert.deepEqual(request.blocks, upTo(all, through));
   }
 });
 
@@ -102,13 +107,14 @@ test("input received during inference is retained for the next request", { timeo
   assert.equal(runtime.requests.length, 1);
   runtime.respond(0, "void 0");
   await until(() => runtime.requests.length === 2);
-  const entries = runtime.read();
+  const all = runtime.read();
+  const entries = visible(all);
   assert.deepEqual(entries.map((entry) => entry.event.type), [
     "start", "stdin", "stdin", "eval", "result",
   ]);
   assert.deepEqual(entries[1].event, { type: "stdin", text: "  first  " });
-  assert.deepEqual(runtime.requests[0].blocks, entries.slice(0, 1).map(renderEntry));
-  assert.deepEqual(runtime.requests[1].blocks, entries.map(renderEntry));
+  assert.deepEqual(runtime.requests[0].blocks, upTo(all, 1));
+  assert.deepEqual(runtime.requests[1].blocks, all.map(renderEntry));
 });
 
 test("syntax errors and rejected evaluations each produce a result and continue inference", { timeout: 10_000 }, async (t) => {
@@ -118,7 +124,7 @@ test("syntax errors and rejected evaluations each produce a result and continue 
     runtime.respond(index, code);
     await until(() => runtime.requests.length === index + 2);
   }
-  const events = runtime.read().map((entry) => entry.event);
+  const events = visible(runtime.read()).map((entry) => entry.event);
   assert.deepEqual(events.map((event) => event.type), [
     "start", "eval", "result", "eval", "result", "eval", "result",
   ]);
@@ -144,7 +150,7 @@ test("human input reaches the model while an earlier evaluation is still running
 
   runtime.child.send({ type: "input", text: "hello while waiting\n" });
   await until(() => runtime.requests.length === 2);
-  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "eval", "stdout", "stdout", "stdin"]);
+  assert.deepEqual(visible(runtime.read()).map(({ event }) => event.type), ["start", "eval", "stdout", "stdout", "stdin"]);
   assert.deepEqual(runtime.requests[1].blocks, runtime.read().map(renderEntry));
 
   // A second evaluation runs and settles while the first is still waiting.
@@ -153,17 +159,18 @@ test("human input reaches the model while an earlier evaluation is still running
   // The first evaluation settles during the third model call; that call's
   // prompt doesn't include it, the next one does.
   runtime.child.stdin!.write("resume\n");
-  await until(() => runtime.read().length === 8);
-  assert.deepEqual(runtime.requests[2].blocks, runtime.read().slice(0, 7).map(renderEntry));
+  await until(() => visible(runtime.read()).length === 8);
+  assert.deepEqual(runtime.requests[2].blocks, upTo(runtime.read(), 7));
   runtime.respond(2, "void 0");
   await until(() => runtime.requests.length === 4);
-  const entries = runtime.read();
+  const all = runtime.read();
+  const entries = visible(all);
   assert.deepEqual(entries.map(({ event }) => event.type), [
     "start", "eval", "stdout", "stdout", "stdin", "eval", "result", "result", "eval", "result",
   ]);
-  assert.deepEqual(entries[6].event, { type: "result", evalId: 6, outcome: "return", text: "'second'" });
-  assert.deepEqual(entries[7].event, { type: "result", evalId: 2, outcome: "return", text: "'resumed'" });
-  assert.deepEqual(runtime.requests[3].blocks, entries.map(renderEntry));
+  assert.deepEqual(entries[6].event, { type: "result", evalId: entries[5].seq, outcome: "return", text: "'second'" });
+  assert.deepEqual(entries[7].event, { type: "result", evalId: entries[1].seq, outcome: "return", text: "'resumed'" });
+  assert.deepEqual(runtime.requests[3].blocks, all.map(renderEntry));
 });
 
 test("quiet model calls are spaced out, and human input ends the wait", { timeout: 10_000 }, async (t) => {
@@ -196,7 +203,7 @@ test("empty code ends the turn until something happens", { timeout: 10_000 }, as
   await new Promise((resolve) => setTimeout(resolve, 100));
   // Nothing evaluated, nothing recorded, no further call.
   assert.equal(runtime.requests.length, 1);
-  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start"]);
+  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "generation"]);
 
   runtime.child.send({ type: "input", text: "wake up\n" });
   await until(() => runtime.requests.length === 2);
@@ -210,7 +217,7 @@ test("empty code ends the turn until something happens", { timeout: 10_000 }, as
   assert.equal(runtime.requests.length, 3);
   runtime.child.stdin!.write("trigger\n");
   await until(() => runtime.requests.length === 4);
-  assert.deepEqual(runtime.read().map(({ event }) => event.type), ["start", "stdin", "eval", "result", "stdout"]);
+  assert.deepEqual(visible(runtime.read()).map(({ event }) => event.type), ["start", "stdin", "eval", "result", "stdout"]);
 });
 
 test("asynchronous output arriving during generation is included in the following prompt", { timeout: 10_000 }, async (t) => {
@@ -231,6 +238,6 @@ test("asynchronous output arriving during generation is included in the followin
   runtime.respond(1, "void 0");
   await until(() => runtime.requests.length === 3);
   const entries = runtime.read();
-  assert.deepEqual(entries.map(({ event }) => event.type), ["start", "eval", "result", "stdout", "stderr", "eval", "result"]);
+  assert.deepEqual(visible(entries).map(({ event }) => event.type), ["start", "eval", "result", "stdout", "stderr", "eval", "result"]);
   assert.deepEqual(runtime.requests[2].blocks, entries.map(renderEntry));
 });

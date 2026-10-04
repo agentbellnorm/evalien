@@ -22,6 +22,10 @@ const events: TrajectoryEvent[] = [
   { type: "stderr", text: "warning\n" },
   { type: "result", evalId: 2, outcome: "return", text: "undefined" },
   { type: "result", evalId: 2, outcome: "throw", text: "TypeError: broken\n  at repl:1" },
+  {
+    type: "generation", through: 7, model: "anthropic/test", latencyMs: 2300, finishReason: "stop",
+    usage: { uncachedInputTokens: 4, cacheReadTokens: 3150, cacheWriteTokens: 531, outputTokens: 213, reasoningTokens: 40, costUSD: 0.0041 },
+  },
 ];
 const entries: Entry[] = events.map((event, i) => ({ seq: i + 1, timestamp, event }));
 
@@ -49,6 +53,11 @@ test("deserialization rejects corrupt, unknown, and incomplete records", () => {
       { type: "stdout", text: null },
       { type: "result", evalId: 2, outcome: "return" },
       { type: "result", evalId: 2, outcome: "timeout", text: "x" },
+      { type: "generation", through: 1, model: "m", latencyMs: 1, finishReason: "stop" },
+      ...[{ costUSD: -1 }, { costUSD: NaN }, { outputTokens: 1.5 }, { cacheReadTokens: "3" }].map((bad) => ({
+        type: "generation", through: 1, model: "m", latencyMs: 1, finishReason: "stop",
+        usage: { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, costUSD: 0, ...bad },
+      })),
       ...[0, -1, 1.5, "2", Number.MAX_SAFE_INTEGER + 1].map((evalId) => ({
         type: "result", evalId, outcome: "return", text: "x",
       })),
@@ -66,6 +75,8 @@ test("rendering shows event identity, completion status, and framed multiline co
     '[3 2026-09-20T12:00:00.000Z stdin]\n|   hello\n| [result]\n| "quoted"\u0000  \n\n');
   assert.match(renderEntry(entries[0]), /Previous live bindings/);
   assert.match(renderEntry(entries[6]), /result eval=2 throw/);
+  assert.equal(renderEntry(entries[7]), "[8 2026-09-20T12:00:00.000Z generation]\n" +
+    "| anthropic/test through=7: 2.3s, stop, in 4 + 3150 cached + 531 written, out 213 (40 reasoning), $0.0041\n\n");
 });
 
 test("every appended suffix preserves the existing rendered prefix", () => {

@@ -2,8 +2,7 @@ import readline from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
 import type { Readable } from "node:stream";
 import { inspect } from "node:util";
-import type { Entry, EventLog } from "../contracts.mts";
-import type { Generate } from "../generation.mts";
+import { GenerationError, type Entry, type EventLog, type Generate } from "../contracts.mts";
 import { promptWindow } from "./context.mts";
 import { createContext, evalCode } from "../eval.mts";
 import { captureOutput, writeStdout, writeStderr } from "../output.mts";
@@ -93,19 +92,28 @@ export async function runRuntime({
     writeStdout(`evalien -- agent is waking up (${cursor} prior events)...\n\n`);
 
     for (;;) {
-      const through = await trajectory.waitAfter(cursor);
-      const observations = trajectory.read(cursor, through);
-      cursor = through;
+      const latest = await trajectory.waitAfter(cursor);
+      const observations = trajectory.read(cursor, latest);
+      cursor = latest;
       if (!observations.some(wakes)) continue;
       quiet = observations.some(human) ? 0 : quiet + 1;
       if (quiet > 0) await pace();
 
       // Read a fixed prefix. Anything arriving during generation remains
       // after the cursor for the next iteration.
-      const blocks = promptWindow(trajectory, cursor);
-      debug(`thinking... (through event ${cursor})`);
+      const through = cursor;
+      const blocks = promptWindow(trajectory, through);
+      debug(`thinking... (through event ${through})`);
       lastCall = Date.now();
-      const code = await generate({ instructions, blocks });
+      let generated;
+      try {
+        generated = await generate({ instructions, blocks });
+      } catch (err) {
+        if (err instanceof GenerationError) trajectory.append({ type: "generation", through, ...err.generation });
+        throw err;
+      }
+      const { code, ...generation } = generated;
+      trajectory.append({ type: "generation", through, ...generation });
       // No code ends the turn. The next waking observation starts another.
       if (!code.trim()) {
         debug("idle until the next event");

@@ -13,9 +13,47 @@ export type TrajectoryEvent =
       evalId: number;
       outcome: "return" | "throw";
       text: string;
-    };
+    }
+  /** A model call. `through` is the last seq its prompt included. */
+  | ({ type: "generation"; through: number } & Generation);
 
 export type OutputEvent = Extract<TrajectoryEvent, { type: "stdout" | "stderr" }>;
+
+/** Tokens by billing class, and their cost. */
+export interface Usage {
+  uncachedInputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  costUSD: number;
+}
+
+/** What one model call cost and how it ended. */
+export interface Generation {
+  model: string;
+  latencyMs: number;
+  finishReason: string;
+  usage: Usage;
+}
+
+export interface GenerateInput {
+  instructions: string;
+  blocks: readonly string[];
+}
+
+/** Completed JavaScript source, or empty to do nothing. */
+export type Generate = (input: GenerateInput) => Promise<Generation & { code: string }>;
+
+/** A billed call that produced no usable source. */
+export class GenerationError extends Error {
+  override name = "GenerationError";
+  readonly generation: Generation;
+  constructor(message: string, generation: Generation) {
+    super(message);
+    this.generation = generation;
+  }
+}
 
 export interface Entry {
   seq: number;
