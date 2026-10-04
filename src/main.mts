@@ -1,10 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
+import { readConfig } from "./config.mts";
 import { createSqliteStore } from "./db/sqlite-store.mts";
 import { createEvaluator } from "./evaluation/node-eval.mts";
 import { runRuntime } from "./harness/runtime.mts";
 import { createGenerate } from "./inference/ai-sdk.mts";
 import { BudgetExceededError, withBudget } from "./inference/budget.mts";
-import { readInferenceConfig } from "./inference/config.mts";
 import { buildSystemPrompt } from "./system-prompt.mts";
 import { captureOutput, writeStderr, writeStdout } from "./terminal/capture.mts";
 import { showTrajectory } from "./terminal/display.mts";
@@ -12,9 +12,10 @@ import { debug } from "./terminal/format.mts";
 import { lineInput } from "./terminal/input.mts";
 import { createTrajectory } from "./trajectory/log.mts";
 
-const dbPath = process.env.AGENT_DB_PATH || "/data/agent.db";
-const config = readInferenceConfig(process.env);
-const { generate } = withBudget(createGenerate(config, { warn: debug }), config.budgetUSD);
+// The composition root: the only module that knows which implementation
+// fills each contract.
+const { dbPath, inference } = readConfig(process.env);
+const { generate } = withBudget(createGenerate(inference, { warn: debug }), inference.budgetUSD);
 for (const key of Object.keys(process.env)) delete process.env[key];
 
 const db = new DatabaseSync(dbPath);

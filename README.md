@@ -36,12 +36,13 @@ The agent has a SQLite database (`node:sqlite`) that persists across container r
 | `stdin` | Human input |
 | `stdout`, `stderr` | Captured runtime output |
 | `result` | Evaluation ID, `return` or `throw`, and captured value/error text |
+| `generation` | A model call: model, the seq its prompt ran through, latency, finish reason, tokens, and cost |
 
-Each entry has a database sequence number and an observation timestamp. A result references the sequence number of its eval. Even `undefined` completions are recorded. Output is captured as it happens, independently of evaluation boundaries.
+Each entry has a sequence number and an observation timestamp. A result references the sequence number of its eval. A model call is recorded right before the eval it produced, including calls that failed. The agent sees `generation` entries in its prompt, but they don't wake it. Even `undefined` completions are recorded. Output is captured as it happens, independently of evaluation boundaries.
 
 The trajectory library validates a discriminated union, serializes events as versioned JSON, and renders entries independently. Appending entries preserves earlier rendered text. Results contain captured text, so loading history never reconstructs live JavaScript objects or reruns code.
 
-`trajectory.waitAfter(seq)` returns the latest sequence if newer entries already exist, or waits for `append()` on that trajectory instance. Each consumer owns its cursor; reads leave the log intact. This connects event producers to inference without polling or a separate event queue. Arrivals during generation or evaluation are already in the log when the consumer resumes.
+The trajectory sits on a generic record store: SQLite in production, memory in tests. The store keeps opaque records in sequence and knows nothing about events. `trajectory.waitAfter(seq)` returns the latest sequence if newer entries already exist, or waits for `append()` on that trajectory instance. Each consumer owns its cursor; reads leave the log intact. This connects event producers to inference without polling or a separate event queue. Arrivals during generation or evaluation are already in the log when the consumer resumes.
 
 The runtime renders each entry as a stable text block for generation. A request reads through a fixed sequence number. The recent context window advances in 200-event steps, keeping roughly 500–700 events; moving its beginning establishes a new cache prefix. Entry bodies over 8,000 characters render as head and tail with a pointer to the full event, and the window drops older entries if it would exceed 400,000 characters, so output floods can't inflate the cost of each call. Older events remain queryable with `db`:
 
@@ -88,26 +89,24 @@ Use any model ID supported by the selected provider and your account. The defaul
 
 Provider/model selection happens once at startup. Credentials and configuration are captured before environment variables are cleared. Switching providers changes configuration only.
 
-The runtime depends on an injected function with this complete interface:
+The runtime depends on an injected function with this interface (`src/contracts.mts`):
 
 ```ts
-type Generate = (input: {
-  instructions: string;
-  blocks: readonly string[];
-}) => Promise<string>;
+type Generate = (input: { instructions: string; blocks: readonly string[] })
+  => Promise<{ code: string; model: string; latencyMs: number; finishReason: string; usage: Usage }>;
 ```
 
-`src/llm.mts` implements it using AI SDK Core and the direct OpenAI, Anthropic, and Google providers. SDK types, API settings, usage reporting, and cache state stay inside that adapter. It requests a `{ code }` object through the provider's native structured output (`output_config.format` for Anthropic, `json_schema` text format for OpenAI, `responseJsonSchema` for Gemini), so replies can't be markup or fenced prose. It returns completed source. Truncated, unparseable, or otherwise unsuccessful generation throws before evaluation, after its usage is reported. Runtime tests inject this function directly.
+`src/inference/ai-sdk.mts` implements it using AI SDK Core and the direct OpenAI, Anthropic, and Google providers. SDK types, API settings, pricing, and cache state stay inside that adapter. It requests a `{ code }` object through the provider's native structured output (`output_config.format` for Anthropic, `json_schema` text format for OpenAI, `responseJsonSchema` for Gemini), so replies can't be markup or fenced prose. It returns completed source with the call's usage and cost. Truncated, unparseable, or otherwise unsuccessful generation throws a `GenerationError` that carries the usage, before anything is evaluated. Harness tests inject this function directly.
 
 For Anthropic, the adapter sets cache breakpoints on the instructions, the previous unchanged prompt boundary, and the newest block. OpenAI and Gemini use their default implicit prefix caching on supported models. The stored trajectory contains no provider-specific cache settings.
 
 ## Cost and run reports
 
-Every billed model response, including a rejected truncated one, is logged to the `generations` table in the same database: the trajectory seq its prompt ran through, latency, finish reason, uncached/cached/written input tokens, output and reasoning tokens, and cost. `MODEL_BUDGET_USD` (default `1`) caps spend per process. Once it's reached, the runtime makes no further model calls and exits with status 2. The call that crosses the limit still completes. Spend is counted in memory, so evaluated code editing the table doesn't reset it. Rates are built in for `anthropic/claude-sonnet-5-5` and `anthropic/claude-opus-5-5`. Other models need `MODEL_PRICING=input,output[,cacheRead,cacheWrite]` in USD per million tokens, and startup fails without it.
+Every billed model response, including a rejected truncated one, is a `generation` event in the trajectory. `MODEL_BUDGET_USD` (default `1`) caps spend per process. Once it's reached, the runtime makes no further model calls and exits with status 2. The call that crosses the limit still completes. Spend is counted in memory, so evaluated code editing its trajectory doesn't reset it. Rates are built in for `anthropic/claude-sonnet-5-5` and `anthropic/claude-opus-5-5`. Other models need `MODEL_PRICING=input,output[,cacheRead,cacheWrite]` in USD per million tokens, and startup fails without it.
 
 ```
 npm run report                      # ./agent.db: summary and quality checks
-npm run report -- --timeline --last # the latest run, with model calls interleaved
+npm run report -- --timeline --last # the latest run, rendered as the model sees it
 npm run report:docker -- --timeline # the podman volume (uses the last built image)
 ```
 
@@ -125,21 +124,22 @@ The container runs with:
 - Network access (bridge mode)
 - Env vars nuked after model configuration and credential capture
 
-## Files
+## Architecture
 
-- `src/main.mts` — configuration and startup
-- `src/runtime.mts` — event producers, the trajectory consumer, concurrent evaluation, and pacing
-- `src/generation.mts` — provider-independent generation contract
+Modules share the types in `src/contracts.mts` and never import each other. `src/main.mts` is the only place that wires implementations together. `test/boundaries.test.mts` enforces this, and checks that SQLite, readline, and the AI SDK stay inside the module that adapts them.
+
+- `src/contracts.mts` — events, usage, and the interfaces: `RecordStore`, `EventLog`, `Generate`, `Evaluator`, `InputSource`, `OutputSource`
+- `src/db/` — an append-only SQLite record store; contents are opaque strings
+- `src/trajectory/` — the versioned event codec and the event log over any record store; a memory store for tests
+- `src/inference/` — the AI SDK adapter, provider configuration, pricing, and the spend budget
+- `src/evaluation/` — runs source as an async function body with the globals it's given
+- `src/harness/` — the runtime loop, wake rules and pacing (`policy.mts`), and rendering and the prompt window (`context.mts`)
+- `src/terminal/` — line input, stdout/stderr capture, and the display that follows the trajectory
+- `src/report/` — run summary, timeline, and quality checks
+- `src/config.mts` — everything read from the environment
 - `src/system-prompt.mts` — the agent's system prompt
-- `src/trajectory.mts` — event types, validated JSON codecs, deterministic rendering
-- `src/trajectory-store.mts` — SQLite append, bounded reads, and cursor subscriptions
-- `src/output.mts` — stdout/stderr capture and separate host writers
-- `src/llm.mts` — AI SDK adapter, provider configuration, and prompt caching
-- `src/meter.mts` — model-call log, pricing, and spend budget
-- `src/report.mts` — run summary, timeline, and quality checks
-- `src/eval.mts` — JavaScript evaluation
-- `src/util.mts` — error handling and terminal formatting
-- `test/` — codec, persistence, rendering, stream capture, and runtime integration tests
+- `src/main.mts` — composition and process lifecycle
+- `test/` — unit tests per module, in-memory harness tests, capture and signal tests in real processes
 - `Dockerfile` — hardened container image
 - `.env` — your API key (not committed)
 
