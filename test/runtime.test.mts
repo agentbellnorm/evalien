@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import type { GenerateInput } from "../src/generation.mts";
-import { deserializeEvent, renderEntry, type Entry } from "../src/trajectory.mts";
+import type { Entry } from "../src/contracts.mts";
+import { renderEntry } from "../src/harness/context.mts";
+import { deserializeEvent } from "../src/trajectory/codec.mts";
 
 async function until(condition: () => boolean): Promise<void> {
   const deadline = Date.now() + 5_000;
@@ -55,7 +57,7 @@ async function startRuntime(t: TestContext, idleDelays?: number[]) {
       db.exec("PRAGMA busy_timeout = 1000");
       try {
         return db.prepare("SELECT * FROM trajectory ORDER BY seq").all().map((row): Entry => ({
-          seq: Number(row.seq), timestamp: String(row.timestamp), event: deserializeEvent(String(row.event)),
+          seq: Number(row.seq), timestamp: String(row.timestamp), event: deserializeEvent(String(row.data)),
         }));
       }
       finally { db.close(); }

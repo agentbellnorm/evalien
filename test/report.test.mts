@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { createMeter, type GenerationReport } from "../src/meter.mts";
 import { analyze, readRun, renderTimeline } from "../src/report.mts";
-import { initTrajectory } from "../src/trajectory-store.mts";
-import type { TrajectoryEvent } from "../src/trajectory.mts";
+import type { TrajectoryEvent } from "../src/contracts.mts";
+import { createSqliteStore } from "../src/db/sqlite-store.mts";
+import { createTrajectory } from "../src/trajectory/log.mts";
 
 const usage: GenerationReport = {
   latencyMs: 0, finishReason: "stop", uncachedInputTokens: 100, cacheReadTokens: 900,
@@ -18,7 +19,7 @@ const usage: GenerationReport = {
 
 /** Record a run as the runtime does: each model call is logged just before its eval. */
 async function record(db: DatabaseSync, steps: (TrajectoryEvent | "generate" | "idle")[]): Promise<void> {
-  const trajectory = initTrajectory(db);
+  const trajectory = createTrajectory(createSqliteStore(db, "trajectory"));
   const meter = createMeter(db, {
     model: "anthropic/test", pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, budgetUSD: 1,
     position: trajectory.lastSeq,

@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { PassThrough } from "node:stream";
-import { runRuntime } from "../../src/runtime.mts";
+import { createSqliteStore } from "../../src/db/sqlite-store.mts";
+import { runRuntime } from "../../src/harness/runtime.mts";
+import { createTrajectory } from "../../src/trajectory/log.mts";
 import type { Generate } from "../../src/generation.mts";
 
 // Exercise the runtime in its own process, with an injected function and no SDK.
@@ -28,7 +30,7 @@ process.on("message", (message: Message) => {
 
 try {
   const idleDelays = process.argv[3] ? JSON.parse(process.argv[3]) as number[] : [];
-  await runRuntime({ db, input, generate, instructions: "Runtime test instructions", idleDelays });
+  await runRuntime({ log: createTrajectory(createSqliteStore(db, "trajectory")), db, input, generate, instructions: "Runtime test instructions", idleDelays });
 } finally {
   db.close();
 }

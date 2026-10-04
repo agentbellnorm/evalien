@@ -1,24 +1,4 @@
-/** Observable events at the runtime boundary. Values are captured as text. */
-export type TrajectoryEvent =
-  | { type: "start" }
-  | { type: "eval"; code: string }
-  | { type: "stdin"; text: string }
-  | { type: "stdout"; text: string }
-  | { type: "stderr"; text: string }
-  | {
-      type: "result";
-      evalId: number;
-      outcome: "return" | "throw";
-      text: string;
-    };
-
-export interface Entry {
-  seq: number;
-  timestamp: string;
-  event: TrajectoryEvent;
-}
-
-export type OutputEvent = Extract<TrajectoryEvent, { type: "stdout" | "stderr" }>;
+import type { TrajectoryEvent } from "../contracts.mts";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -90,45 +70,4 @@ export function deserializeEvent(json: string): TrajectoryEvent {
     throw new TypeError(`Unsupported trajectory version: ${String(envelope.version)}`);
   }
   return parseEvent(envelope.event);
-}
-
-/** Larger bodies keep their head and tail; the full text stays in the database. */
-export const MAX_ENTRY_CHARS = 8_000;
-
-function clip(seq: number, body: string): string {
-  if (body.length <= MAX_ENTRY_CHARS) return body;
-  const half = MAX_ENTRY_CHARS / 2;
-  return `${body.slice(0, half)}\n… ${body.length - MAX_ENTRY_CHARS} characters omitted; full event: SELECT event FROM trajectory WHERE seq = ${seq} …\n${body.slice(-half)}`;
-}
-
-/** Each entry renders independently, so appending preserves the existing text. */
-export function renderEntry({ seq, timestamp, event }: Entry): string {
-  let label: string = event.type;
-  let body: string;
-  switch (event.type) {
-    case "start":
-      body = "Fresh runtime. Previous live bindings, callbacks, and connections are gone.";
-      break;
-    case "eval":
-      body = event.code;
-      break;
-    case "stdin":
-    case "stdout":
-    case "stderr":
-      body = event.text;
-      break;
-    case "result":
-      label = `result eval=${event.evalId} ${event.outcome}`;
-      body = event.text;
-      break;
-    default: {
-      const exhaustive: never = event;
-      throw new TypeError(`Unknown trajectory event: ${exhaustive}`);
-    }
-  }
-  return `[${seq} ${timestamp} ${label}]\n${clip(seq, body).split("\n").map((line) => `| ${line}`).join("\n")}\n\n`;
-}
-
-export function renderTrajectory(entries: readonly Entry[]): string {
-  return entries.map(renderEntry).join("");
 }

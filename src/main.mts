@@ -2,8 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import { createGenerate, readModelConfig } from "./llm.mts";
 import { BudgetExceededError, createMeter, type Meter } from "./meter.mts";
 import { writeStderr } from "./output.mts";
-import { runRuntime } from "./runtime.mts";
-import { initTrajectory } from "./trajectory-store.mts";
+import { createSqliteStore } from "./db/sqlite-store.mts";
+import { runRuntime } from "./harness/runtime.mts";
+import { createTrajectory } from "./trajectory/log.mts";
 import { buildSystemPrompt } from "./system-prompt.mts";
 
 const dbPath = process.env.AGENT_DB_PATH || "/data/agent.db";
@@ -13,11 +14,12 @@ const generate = createGenerate(config, undefined, (report) => meter!.record(rep
 for (const key of Object.keys(process.env)) delete process.env[key];
 
 const db = new DatabaseSync(dbPath);
+const log = createTrajectory(createSqliteStore(db, "trajectory"));
 meter = createMeter(db, {
   model: `${config.provider}/${config.model}`,
   pricing: config.pricing,
   budgetUSD: config.budgetUSD,
-  position: initTrajectory(db).lastSeq,
+  position: log.lastSeq,
 });
 
 // As PID 1 in a container, the process has no default signal handling, so
@@ -32,7 +34,7 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
 
 let exitCode = 0;
 try {
-  await runRuntime({ db, generate: meter.guard(generate), instructions: buildSystemPrompt(dbPath) });
+  await runRuntime({ log, db, generate: meter.guard(generate), instructions: buildSystemPrompt(dbPath) });
 } catch (err) {
   if (!(err instanceof BudgetExceededError)) throw err;
   writeStderr(`\n${err.message}. Stopping.\n`);

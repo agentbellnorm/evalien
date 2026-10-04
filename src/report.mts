@@ -1,6 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import { compile } from "./eval.mts";
-import { deserializeEvent, renderEntry, type Entry } from "./trajectory.mts";
+import type { Entry } from "./contracts.mts";
+import { createSqliteStore } from "./db/sqlite-store.mts";
+import { renderEntry } from "./harness/context.mts";
+import { createTrajectory } from "./trajectory/log.mts";
 
 /** Quality bars for a run. A failing check exits nonzero. */
 export const THRESHOLDS = {
@@ -41,9 +44,7 @@ export interface Report {
 }
 
 export function readRun(db: DatabaseSync, lastRunOnly = false): { entries: Entry[]; generations: Generation[] } {
-  let entries = db.prepare("SELECT * FROM trajectory ORDER BY seq").all().map((row): Entry => ({
-    seq: Number(row.seq), timestamp: String(row.timestamp), event: deserializeEvent(String(row.event)),
-  }));
+  let entries = createTrajectory(createSqliteStore(db, "trajectory")).read();
   if (lastRunOnly) {
     const start = entries.findLastIndex(({ event }) => event.type === "start");
     entries = entries.slice(Math.max(0, start));

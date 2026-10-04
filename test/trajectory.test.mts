@@ -4,8 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { deserializeEvent, serializeEvent, renderEntry, renderTrajectory, type Entry, type TrajectoryEvent } from "../src/trajectory.mts";
-import { initTrajectory } from "../src/trajectory-store.mts";
+import type { Entry, TrajectoryEvent } from "../src/contracts.mts";
+import { createSqliteStore } from "../src/db/sqlite-store.mts";
+import { renderEntry, renderTrajectory } from "../src/harness/context.mts";
+import { deserializeEvent, serializeEvent } from "../src/trajectory/codec.mts";
+import { createTrajectory } from "../src/trajectory/log.mts";
+import { createMemoryStore } from "../src/trajectory/memory-store.mts";
+
+const initTrajectory = (db: DatabaseSync) => createTrajectory(createSqliteStore(db, "trajectory"));
 
 const timestamp = "2026-09-20T12:00:00.000Z";
 const events: TrajectoryEvent[] = [
@@ -181,6 +187,25 @@ test("corrupt persisted events fail visibly instead of silently changing history
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
   const trajectory = initTrajectory(db);
-  db.prepare("INSERT INTO trajectory (timestamp, event) VALUES (?, ?)").run(timestamp, '{"version":1,"event":{"type":"unknown"}}');
+  db.prepare("INSERT INTO trajectory (timestamp, data) VALUES (?, ?)").run(timestamp, '{"version":1,"event":{"type":"unknown"}}');
   assert.throws(() => trajectory.read(), /Unknown trajectory event/);
+});
+
+test("the memory store behaves like SQLite behind the trajectory", async () => {
+  const trajectory = createTrajectory(createMemoryStore());
+  const seen: Entry[] = [];
+  const stop = trajectory.subscribe((entry) => seen.push(entry));
+  const waiting = trajectory.waitAfter(0);
+  const evaluation = trajectory.append({ type: "eval", code: "return 1" });
+  trajectory.append({ type: "result", evalId: evaluation.seq, outcome: "return", text: "1" });
+  assert.throws(() => trajectory.append({ type: "result", evalId: 99, outcome: "return", text: "x" }), /missing evaluation/);
+  assert.equal(await waiting, 2);
+  assert.deepEqual(trajectory.read(1).map(({ event }) => event.type), ["result"]);
+  assert.deepEqual(trajectory.read(2, 1), []);
+  stop();
+  trajectory.append({ type: "start" });
+  // Listeners see each accepted append once, in order, and stop when unsubscribed.
+  assert.deepEqual(seen.map(({ seq, event }) => [seq, event.type]), [[1, "eval"], [2, "result"]]);
+  seen[0].event = { type: "start" };
+  assert.equal(trajectory.read(0, 1)[0].event.type, "eval");
 });

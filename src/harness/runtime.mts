@@ -2,14 +2,15 @@ import readline from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
 import type { Readable } from "node:stream";
 import { inspect } from "node:util";
-import type { Generate } from "./generation.mts";
-import { renderEntry, type Entry } from "./trajectory.mts";
-import { initTrajectory, type Trajectory } from "./trajectory-store.mts";
-import { createContext, evalCode } from "./eval.mts";
-import { captureOutput, writeStdout, writeStderr } from "./output.mts";
-import { debug, color, SYMBOL } from "./util.mts";
+import type { Entry, EventLog } from "../contracts.mts";
+import type { Generate } from "../generation.mts";
+import { promptWindow } from "./context.mts";
+import { createContext, evalCode } from "../eval.mts";
+import { captureOutput, writeStdout, writeStderr } from "../output.mts";
+import { debug, color, SYMBOL } from "../util.mts";
 
 export interface RuntimeOptions {
+  log: EventLog;
   db: DatabaseSync;
   generate: Generate;
   instructions: string;
@@ -24,30 +25,10 @@ export interface RuntimeOptions {
  */
 export const IDLE_DELAYS: readonly number[] = [0, 0, 0, 5_000, 30_000, 120_000, 600_000];
 
-/** Bounds input cost per call, even when evaluated code floods output. */
-export const MAX_PROMPT_CHARS = 400_000;
-
-/**
- * A recent window whose start moves in fixed steps, so consecutive prompts
- * share a prefix. Only an oversized window drops older entries beyond that.
- */
-export function promptWindow(trajectory: Trajectory, through: number): string[] {
-  let after = Math.floor(Math.max(0, through - 500) / 200) * 200;
-  let blocks = trajectory.read(after, through).map(renderEntry);
-  const size = () => blocks.reduce((total, block) => total + block.length, 0);
-  while (after + 200 < through && size() > MAX_PROMPT_CHARS) {
-    after += 200;
-    blocks = trajectory.read(after, through).map(renderEntry);
-  }
-  while (blocks.length > 1 && size() > MAX_PROMPT_CHARS) blocks.shift();
-  return blocks;
-}
-
 /** One process owns one runtime. The caller owns the database connection. */
 export async function runRuntime({
-  db, generate, instructions, input = process.stdin, idleDelays = IDLE_DELAYS,
+  log: trajectory, db, generate, instructions, input = process.stdin, idleDelays = IDLE_DELAYS,
 }: RuntimeOptions): Promise<void> {
-  const trajectory = initTrajectory(db);
   const ctx = createContext(db);
   let cursor = trajectory.lastSeq();
   let pending = 0;

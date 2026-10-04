@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { BudgetExceededError, costOf, createMeter, type GenerationReport } from "../src/meter.mts";
-import { MAX_PROMPT_CHARS, promptWindow } from "../src/runtime.mts";
-import { MAX_ENTRY_CHARS, renderEntry } from "../src/trajectory.mts";
-import { initTrajectory } from "../src/trajectory-store.mts";
+import { MAX_ENTRY_CHARS, MAX_PROMPT_CHARS, promptWindow, renderEntry } from "../src/harness/context.mts";
+import { createTrajectory } from "../src/trajectory/log.mts";
+import { createMemoryStore } from "../src/trajectory/memory-store.mts";
 
 const pricing = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
 const report = (overrides: Partial<GenerationReport> = {}): GenerationReport => ({
@@ -52,12 +52,12 @@ test("oversized entries keep their head and tail and point at the full event", (
   assert.ok(rendered.length < MAX_ENTRY_CHARS + 500);
   assert.match(rendered, /^\[7 t stdout\]\n\| a/);
   assert.match(rendered, /z\n\n$/);
-  assert.match(rendered, /8006 characters omitted; full event: SELECT event FROM trajectory WHERE seq = 7/);
+  assert.match(rendered, /8006 characters omitted; full text in trajectory seq 7/);
   assert.doesNotMatch(rendered, /MIDDLE/);
 });
 
 test("the prompt window stays aligned when small and bounded when output floods", () => {
-  const trajectory = initTrajectory(new DatabaseSync(":memory:"));
+  const trajectory = createTrajectory(createMemoryStore());
   for (let i = 0; i < 450; i++) trajectory.append({ type: "stdout", text: `line ${i}\n` });
   // Small entries: the usual 200-aligned start at seq 0.
   assert.equal(promptWindow(trajectory, 450).length, 450);

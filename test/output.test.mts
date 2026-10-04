@@ -4,9 +4,10 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { captureOutput, writeStdout, writeStderr } from "../src/output.mts";
-import { initTrajectory } from "../src/trajectory-store.mts";
+import { createTrajectory } from "../src/trajectory/log.mts";
+import { createMemoryStore } from "../src/trajectory/memory-store.mts";
 import { createContext, evalCode } from "../src/eval.mts";
-import type { OutputEvent } from "../src/trajectory.mts";
+import type { OutputEvent } from "../src/contracts.mts";
 
 // The Node test runner itself writes a binary protocol to stdout. Exercise
 // process-wide capture in a process that has no test reporter attached.
@@ -15,7 +16,8 @@ function isolated(check: () => void | Promise<void>): void {
     import assert from 'node:assert/strict';
     import { DatabaseSync } from 'node:sqlite';
     import { captureOutput, writeStdout, writeStderr } from './src/output.mts';
-    import { initTrajectory } from './src/trajectory-store.mts';
+    import { createTrajectory } from './src/trajectory/log.mts';
+    import { createMemoryStore } from './src/trajectory/memory-store.mts';
     import { createContext, evalCode } from './src/eval.mts';
     await (${check.toString()})();
   `], { cwd: fileURLToPath(new URL("../", import.meta.url)), stdio: "pipe" });
@@ -65,7 +67,7 @@ test("capture preserves channels, split UTF-8, write callbacks and backpressure"
 
 test("asynchronous output is recorded after completion and between later evaluations", () => isolated(async () => {
   const db = new DatabaseSync(":memory:");
-  const trajectory = initTrajectory(db);
+  const trajectory = createTrajectory(createMemoryStore());
   const ctx = createContext(db);
   const originalOut = process.stdout.write;
   const originalErr = process.stderr.write;
