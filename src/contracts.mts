@@ -88,3 +88,20 @@ export interface EventLog {
   /** Called synchronously for each appended entry, in order. */
   subscribe(listener: (entry: Entry) => void): () => void;
 }
+
+export interface Evaluation {
+  outcome: "return" | "throw";
+  /** The return value or error, captured as text. */
+  text: string;
+}
+
+/** Runs model-generated source. Never rejects; failures are a "throw" outcome. */
+export interface Evaluator {
+  evaluate(code: string): Promise<Evaluation>;
+}
+
+/** Calls back for each line of human input. Returns a function that stops listening. */
+export type InputSource = (onLine: (line: string) => void) => () => void;
+
+/** Reports output written by running code. Returns a function that stops capturing. */
+export type OutputSource = (emit: (event: OutputEvent) => void) => () => void;

@@ -1,9 +1,4 @@
-import { writeStderr } from "./output.mts";
-
-export function toError(value: unknown): Error {
-  if (value instanceof Error) return value;
-  return new Error(String(value));
-}
+import { writeStderr } from "./capture.mts";
 
 // ANSI color helpers
 const RESET = "\x1b[0m";

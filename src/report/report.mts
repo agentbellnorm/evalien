@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import type { Entry, TrajectoryEvent } from "../contracts.mts";
 import { createSqliteStore } from "../db/sqlite-store.mts";
-import { compile } from "../eval.mts";
+import { compile } from "../evaluation/node-eval.mts";
 import { renderTrajectory } from "../harness/context.mts";
 import { createTrajectory } from "../trajectory/log.mts";
 

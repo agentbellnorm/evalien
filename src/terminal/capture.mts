@@ -1,5 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
-import type { OutputEvent } from "./contracts.mts";
+import type { OutputEvent } from "../contracts.mts";
 
 /** Host output bypasses capture. Runtime writes still reach the actual terminal. */
 export const writeStdout = process.stdout.write.bind(process.stdout);

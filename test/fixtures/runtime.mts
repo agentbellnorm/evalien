@@ -1,7 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { PassThrough } from "node:stream";
 import { createSqliteStore } from "../../src/db/sqlite-store.mts";
+import { createEvaluator } from "../../src/evaluation/node-eval.mts";
 import { runRuntime } from "../../src/harness/runtime.mts";
+import { captureOutput } from "../../src/terminal/capture.mts";
+import { lineInput } from "../../src/terminal/input.mts";
 import { createTrajectory } from "../../src/trajectory/log.mts";
 import type { Generate } from "../../src/contracts.mts";
 
@@ -31,7 +34,11 @@ process.on("message", (message: Message) => {
 
 try {
   const idleDelays = process.argv[3] ? JSON.parse(process.argv[3]) as number[] : [];
-  await runRuntime({ log: createTrajectory(createSqliteStore(db, "trajectory")), db, input, generate, instructions: "Runtime test instructions", idleDelays });
+  await runRuntime({
+    log: createTrajectory(createSqliteStore(db, "trajectory")),
+    evaluator: createEvaluator({ db }),
+    input: lineInput(input),
+    output: captureOutput, generate, instructions: "Runtime test instructions", idleDelays });
 } finally {
   db.close();
 }
