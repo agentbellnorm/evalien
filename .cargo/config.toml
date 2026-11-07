@@ -1,0 +1,4 @@
+# QuickJS is C, so the guest needs a wasm-capable clang and a WASI sysroot.
+# scripts/setup.sh puts wasi-sdk in .tools/, and rquickjs's build reads WASI_SDK.
+[env]
+WASI_SDK = { value = ".tools/wasi-sdk", relative = true }

@@ -1,0 +1,40 @@
+package evalien:sandbox;
+
+/// What the guest can ask of the host. The guest never blocks: it asks, and
+/// the host calls back into an export when the answer is ready.
+interface host {
+  enum outcome { returned, threw }
+  enum channel { stdout, stderr }
+
+  /// Start host capability `name` with JSON `args`. Finishes with `complete(call, ..)`.
+  call: func(call: u32, name: string, args: string);
+  /// Fire `fire(timer)` after `delay-ms`.
+  set-timer: func(timer: u32, delay-ms: f64);
+  clear-timer: func(timer: u32);
+  /// Evaluation `eval` finished with a value or a thrown error, captured as text.
+  settled: func(eval: u64, outcome: outcome, text: string);
+  output: func(channel: channel, text: string);
+  /// Polled while JavaScript runs. True stops the running code.
+  should-interrupt: func() -> bool;
+}
+
+world sandbox {
+  use host.{outcome};
+  import host;
+
+  record config {
+    /// QuickJS heap limit in bytes.
+    memory-limit: u32,
+    /// Granted capabilities, each installed as a JavaScript global.
+    capabilities: list<string>,
+  }
+
+  export init: func(config: config) -> result<_, string>;
+  /// Evaluate `code` as an async function body. Settles through `settled(eval, ..)`.
+  export evaluate: func(eval: u64, code: string);
+  /// Finish host call `call`: JSON value on success, error message on failure.
+  export complete: func(call: u32, answer: result<string, string>);
+  export fire: func(timer: u32);
+  /// Whether `code` compiles as an async function body, without running it.
+  export parses: func(code: string) -> bool;
+}
