@@ -1,0 +1,12 @@
+[package]
+name = "guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "QuickJS compiled to wasm32-unknown-unknown. Its only imports are the evalien bridge and a clock."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rquickjs = { version = "0.14", default-features = false }

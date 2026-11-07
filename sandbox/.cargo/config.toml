@@ -1,0 +1,5 @@
+# QuickJS is C, so the guest needs a wasm-capable clang. scripts/setup.sh puts
+# wasi-sdk in .tools/; rquickjs vendors the libc for wasm32-unknown-unknown.
+[env]
+CC_wasm32_unknown_unknown = { value = ".tools/wasi-sdk/bin/clang", relative = true }
+AR_wasm32_unknown_unknown = { value = ".tools/wasi-sdk/bin/llvm-ar", relative = true }
