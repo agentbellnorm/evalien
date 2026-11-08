@@ -1,0 +1,45 @@
+[package]
+name = "evalien"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "An autonomous agent whose only tool is eval(), driven by an event loop."
+default-run = "evalien"
+
+[workspace]
+resolver = "3"
+members = [".", "guest"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+dotenvy = "0.15"
+humantime = "2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "limits"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util", "net"] }
+url = "2"
+wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "std", "anyhow", "parallel-compilation"] }
+wasmtime-wasi = "50"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.release.package.guest]
+opt-level = "s"
+
+# Cranelift compiling the guest at startup is painfully slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 3

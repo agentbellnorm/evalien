@@ -1,0 +1,16 @@
+# The agent's database (trajectory and its own tables) and the Matrix sync
+# position. SQLite has one writer, so the volume is ReadWriteOnce.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: evalien-data
+  namespace: evalien
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi

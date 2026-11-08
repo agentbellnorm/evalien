@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evalien
+  namespace: evalien
+spec:
+  replicas: 1
+  # Never two pods on the same database: stop the old one before starting the new.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: evalien
+  template:
+    metadata:
+      labels:
+        app: evalien
+    spec:
+      nodeSelector:
+        type: m
+      # The agent needs nothing from the Kubernetes API or other services.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: evalien
+          image: registry.bushnet.diy/evalien:0.1.0
+          envFrom:
+            - configMapRef:
+                name: evalien-config
+            - secretRef:
+                name: evalien-secrets
+          env:
+            - name: AGENT_DB_PATH
+              value: /data/agent.db
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: evalien-data

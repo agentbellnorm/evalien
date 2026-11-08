@@ -1,3 +1,5 @@
-node_modules
+target
+.tools
 .env
-agent.db
+agent.db*
+node_modules

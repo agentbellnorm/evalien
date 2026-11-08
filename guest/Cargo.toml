@@ -1,0 +1,14 @@
+[package]
+name = "guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "QuickJS as a WebAssembly component, implementing wit/sandbox.wit."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rquickjs = { version = "0.14", default-features = false }
+wit-bindgen = "0.63"
