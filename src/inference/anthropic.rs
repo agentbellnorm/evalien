@@ -14,6 +14,11 @@ use super::{Answer, ModelConfig, endpoint, pricing::Tokens, send, settle, source
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const API_VERSION: &str = "2026-10-21";
+/// Follows the trajectory in every request. A cache entry is only reused by a
+/// longer request if it was written before the request's final block, so the
+/// trajectory never ends the request: its last block's entry stays readable,
+/// and only these few tokens are processed uncached.
+const TRAILER: &str = "End of trajectory.";
 
 pub struct Anthropic {
     config: ModelConfig,
@@ -65,10 +70,13 @@ fn reused_prefix(previous: Option<&Prompt>, prompt: &Prompt) -> Option<usize> {
     (extends && !previous.blocks.is_empty()).then(|| previous.blocks.len() - 1)
 }
 
+/// The request, with cache breakpoints on the block the previous prompt ended
+/// with (to read what it wrote) and on the last trajectory block (to write
+/// for the next call).
 fn request_body(config: &ModelConfig, prompt: &Prompt, reused: Option<usize>) -> Value {
     let cache = json!({ "type": "ephemeral" });
     let last = prompt.blocks.len().saturating_sub(1);
-    let content: Vec<Value> = prompt
+    let mut content: Vec<Value> = prompt
         .blocks
         .iter()
         .enumerate()
@@ -80,6 +88,7 @@ fn request_body(config: &ModelConfig, prompt: &Prompt, reused: Option<usize>) ->
             }
         })
         .collect();
+    content.push(json!({ "type": "text", "text": TRAILER }));
     json!({
         "model": config.model,
         "max_tokens": config.max_output_tokens,
@@ -179,11 +188,30 @@ mod tests {
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["required"][0], "code");
         assert_eq!(body["messages"][0]["content"][1]["text"], "b");
-        assert_eq!(cached(&body), [false, true]);
+        assert_eq!(cached(&body), [false, true, false]);
         assert!(
             body.get("temperature").is_none(),
             "sampling parameters are rejected on this API version"
         );
+    }
+
+    #[test]
+    fn the_request_never_ends_on_a_cache_breakpoint() {
+        // The API only reuses a cache entry in a longer request if it was
+        // written before the request's final block. So the last trajectory
+        // block carries the breakpoint, and something small follows it.
+        let body = request_body(&config(Provider::Anthropic, "m"), &prompt(&["a", "b"]), None);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            content.last().unwrap().get("cache_control").is_none(),
+            "the final block has a breakpoint: {content:?}"
+        );
+        let last_entry = content.iter().rposition(|block| block["text"] == "b").unwrap();
+        assert!(
+            content[last_entry].get("cache_control").is_some(),
+            "the last trajectory block isn't cached: {content:?}"
+        );
+        assert!(last_entry < content.len() - 1);
     }
 
     #[test]
@@ -194,11 +222,11 @@ mod tests {
         let config = config(Provider::Anthropic, "m");
         assert_eq!(
             cached(&request_body(&config, &longer, reused_prefix(Some(&first), &longer))),
-            [false, true, false, true]
+            [false, true, false, true, false]
         );
         assert_eq!(
             cached(&request_body(&config, &changed, reused_prefix(Some(&first), &changed))),
-            [false, false, true]
+            [false, false, true, false]
         );
         assert_eq!(reused_prefix(None, &first), None);
     }
