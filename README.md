@@ -103,6 +103,7 @@ The image is distroless and runs as a non-root user.
 | `MATRIX_ACCESS_TOKEN` | | The agent's own Matrix account |
 | `MATRIX_ROOM_ID` | | The room to talk in. It must be unencrypted |
 | `MATRIX_OWNER` | | The only user whose messages reach the agent, e.g. `@you:example.org` |
+| `METRICS_ADDR` | | Serve Prometheus metrics at `http://<addr>/metrics`, e.g. `0.0.0.0:9464` |
 
 Variables in `./.env` are read too; the process environment wins.
 
@@ -127,6 +128,23 @@ The manifests in [`deploy/k8s/`](deploy/k8s/) run one pod with a Longhorn volume
 5. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
 
 The pod runs as non-root with a read-only root filesystem, no capabilities, no service account token, and a NetworkPolicy that allows only DNS, Synapse, and public HTTP(S).
+
+## Metrics
+
+With `METRICS_ADDR` set, the agent serves Prometheus metrics, read off the trajectory like everything else:
+
+| Metric | Labels | |
+| --- | --- | --- |
+| `evalien_model_calls_total` | provider, model, finish_reason | Model calls, by how they ended |
+| `evalien_model_tokens_total` | provider, model, class | Tokens: `input_uncached`, `input_cache_read`, `input_cache_write`, `output`, `output_reasoning` |
+| `evalien_model_cost_usd_total` | provider, model | Spend in USD |
+| `evalien_model_call_duration_seconds` | provider, model | Histogram of call latency |
+| `evalien_budget_daily_usd`, `evalien_budget_spent_today_usd` | | The budget, and today's spend (UTC) |
+| `evalien_events_total` | type | Trajectory events |
+| `evalien_evaluation_duration_seconds` | outcome | Histogram from eval to result |
+| `evalien_evaluations_pending` | | Evaluations still running |
+
+The cache hit rate is `input_cache_read` over all `input_*` tokens. In the cluster, Prometheus finds the pod through its `prometheus.io/*` annotations. Import the dashboard with the monitoring repo's `grafana-sync.sh import deploy/grafana/evalien-dashboard.json`.
 
 ## Reports
 

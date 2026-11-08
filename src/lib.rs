@@ -15,6 +15,7 @@ pub mod evaluation;
 pub mod harness;
 pub mod inference;
 pub mod lifecycle;
+pub mod metrics;
 pub mod quality;
 pub mod system_prompt;
 pub mod terminal;

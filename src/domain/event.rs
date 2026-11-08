@@ -234,6 +234,22 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// The event's type, as it's named in the stored format.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::Start => "start",
+            Event::Eval { .. } => "eval",
+            Event::Stdin { .. } => "stdin",
+            Event::Stdout { .. } => "stdout",
+            Event::Stderr { .. } => "stderr",
+            Event::Result { .. } => "result",
+            Event::Generation { .. } => "generation",
+            Event::Notice { .. } => "notice",
+        }
+    }
+}
+
 /// An event as recorded in the trajectory.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {

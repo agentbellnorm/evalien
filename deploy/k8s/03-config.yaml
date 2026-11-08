@@ -9,6 +9,8 @@ data:
   MODEL: anthropic/claude-sonnet-5-5
   # Per UTC day. When it's spent the agent pauses until midnight and says so.
   MODEL_BUDGET_USD: "3"
+  # Prometheus scrapes this; see the pod annotations and the NetworkPolicy.
+  METRICS_ADDR: "0.0.0.0:9464"
   # The in-cluster Synapse service; this traffic never leaves the cluster.
   MATRIX_HOMESERVER: http://matrix-synapse.skum-matrix.svc.cluster.local:8008
   # The room the agent's account has been invited to, exactly as the client

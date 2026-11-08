@@ -15,6 +15,10 @@ spec:
     metadata:
       labels:
         app: evalien
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
     spec:
       nodeSelector:
         type: m
@@ -37,6 +41,9 @@ spec:
                 name: evalien-config
             - secretRef:
                 name: evalien-secrets
+          ports:
+            - name: metrics
+              containerPort: 9464
           env:
             - name: AGENT_DB_PATH
               value: /data/agent.db

@@ -14,7 +14,9 @@ use evalien::{
     },
     harness::{Harness, Stopped, policy::IDLE_DELAYS},
     inference::{self, Budgeted, spent_on_day},
-    lifecycle, system_prompt,
+    lifecycle,
+    metrics::{self, Metrics},
+    system_prompt,
     terminal::{display, format::debug, input},
 };
 
@@ -41,12 +43,10 @@ async fn run() -> anyhow::Result<u8> {
     let log = Arc::new(Trajectory::new(SqliteStore::new(connection, TRAJECTORY_TABLE)?)?);
 
     // Today's spend so far comes from the recorded calls, so restarts don't reset it.
-    let spent_today = spent_on_day(&log.read_all()?, Timestamp::now());
-    let model = Budgeted::daily(
-        inference::connect(config.inference.model)?,
-        config.inference.budget,
-        spent_today,
-    );
+    let now = Timestamp::now();
+    let spent_today = spent_on_day(&log.read_all()?, now);
+    let budget = config.inference.budget;
+    let model = Budgeted::daily(inference::connect(config.inference.model)?, budget, spent_today);
 
     // The agent's own handle on the database, with the trajectory read-only.
     let capabilities = Capabilities::none()
@@ -57,6 +57,14 @@ async fn run() -> anyhow::Result<u8> {
 
     // The trajectory as it grows: on the terminal, or in the pod's log.
     tokio::spawn(display::show(log.clone(), log.last_seq()));
+    if let Some(addr) = config.metrics {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("serving metrics on {addr}"))?;
+        let metrics = Arc::new(Metrics::new(budget, spent_today, now));
+        tokio::spawn(metrics::follow(log.clone(), metrics.clone(), log.last_seq(), debug));
+        tokio::spawn(metrics::serve(listener, metrics, debug));
+    }
     let channel = match config.human {
         Human::Terminal => {
             let typed = log.clone();

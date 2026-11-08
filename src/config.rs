@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
@@ -12,6 +13,8 @@ pub struct Config {
     pub db_path: PathBuf,
     pub inference: InferenceConfig,
     pub human: Human,
+    /// Where to serve Prometheus metrics, if anywhere.
+    pub metrics: Option<SocketAddr>,
 }
 
 /// How the human reaches the agent.
@@ -31,10 +34,15 @@ pub fn read(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
         Some(matrix) => Human::Matrix(matrix),
         None => Human::Terminal,
     };
+    let metrics = match env.get("METRICS_ADDR").filter(|addr| !addr.is_empty()) {
+        Some(addr) => Some(addr.parse().map_err(|e| ConfigError(format!("METRICS_ADDR: {e}")))?),
+        None => None,
+    };
     Ok(Config {
         inference: inference::config::read(env)?,
         db_path,
         human,
+        metrics,
     })
 }
 
