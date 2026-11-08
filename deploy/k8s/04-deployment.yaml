@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: evalien
-          image: registry.bushnet.diy/evalien:0.1.0
+          image: registry.bushnet.diy/evalien:3dcdb242
           envFrom:
             - configMapRef:
                 name: evalien-config

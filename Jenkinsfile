@@ -11,9 +11,6 @@ pipeline {
     }
     agent {
         kubernetes {
-            // Not the cloud's default template: its agent image is a stale
-            // Java 17 build, and it would override the one pinned below.
-            inheritFrom ''
             agentContainer 'jnlp'
             yaml """
             apiVersion: v1
@@ -25,9 +22,6 @@ pipeline {
               securityContext:
                 runAsUser: 1000
               containers:
-              # The agent's Java must match the controller's (Java 21).
-              - name: jnlp
-                image: jenkins/inbound-agent:latest-jdk21
               - name: yq
                 image: mikefarah/yq:4.44.1
                 command:
