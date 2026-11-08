@@ -1,7 +1,8 @@
 //! Talking to the human through a chat service. A [`Chat`] receives the
 //! human's messages and sends messages back; [`relay`] connects one to the
-//! trajectory. Messages in become `stdin`; the agent's `console.log` output
-//! and the runtime's notices go out. The harness doesn't know chat exists.
+//! trajectory. Messages in become `stdin`; the code the agent runs, its
+//! `console.log` output and the runtime's notices go out. The harness doesn't
+//! know chat exists.
 
 mod matrix;
 
@@ -13,25 +14,29 @@ pub use matrix::{Matrix, MatrixConfig};
 
 /// Longest message to send, in bytes. Longer output goes out in parts.
 const MAX_MESSAGE: usize = 30_000;
+/// Longest code to show, in bytes. Code is cut rather than split, so each
+/// message stays one readable block; the full source is in the trajectory.
+const MAX_CODE: usize = 8_000;
 /// How long to let a burst of output land before sending it as one message.
 const COALESCE: Duration = Duration::from_millis(300);
 const SEND_ATTEMPTS: u32 = 5;
 
-/// Who a message is from, so the chat can show the two differently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Speaker {
-    /// The agent's own output.
-    Agent,
-    /// The runtime, such as a paused budget.
-    Runtime,
+/// What a message says. Each chat decides how to show each kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Body {
+    /// The agent's own words: what it logged.
+    Said(String),
+    /// JavaScript the agent is running.
+    Code(String),
+    /// The runtime telling the human something, such as a paused budget.
+    Notice(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outgoing {
     /// The same across retries and restarts, so a resend never duplicates.
     pub key: String,
-    pub speaker: Speaker,
-    pub text: String,
+    pub body: Body,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,7 +77,7 @@ async fn inbound(chat: &impl Chat, log: &Trajectory, debug: fn(&str)) {
     }
 }
 
-/// Output and notices after `cursor` become messages.
+/// Code, output and notices after `cursor` become messages.
 async fn outbound(chat: &impl Chat, log: &Trajectory, mut cursor: Seq, debug: fn(&str)) {
     loop {
         log.wait_after(cursor).await;
@@ -108,7 +113,7 @@ async fn send(chat: &impl Chat, message: &Outgoing, debug: fn(&str)) {
 }
 
 /// What a batch of entries says to the human, in order. Consecutive output
-/// is joined into one message; each notice is its own.
+/// is joined into one message; each piece of code and each notice is its own.
 pub fn messages(entries: &[Entry]) -> Vec<Outgoing> {
     let mut messages = Vec::new();
     let mut output: Option<(Seq, String)> = None;
@@ -121,9 +126,16 @@ pub fn messages(entries: &[Entry]) -> Vec<Outgoing> {
                 }
                 joined.push_str(text.trim_end_matches('\n'));
             }
+            Event::Eval { code } if !code.trim().is_empty() => {
+                flush(&mut messages, output.take());
+                messages.push(Outgoing {
+                    key: key(entry.seq, 0),
+                    body: Body::Code(shorten(code, MAX_CODE)),
+                });
+            }
             Event::Notice { text } => {
                 flush(&mut messages, output.take());
-                push(&mut messages, entry.seq, Speaker::Runtime, text);
+                push(&mut messages, entry.seq, text, Body::Notice);
             }
             _ => {}
         }
@@ -134,23 +146,38 @@ pub fn messages(entries: &[Entry]) -> Vec<Outgoing> {
 
 fn flush(messages: &mut Vec<Outgoing>, output: Option<(Seq, String)>) {
     if let Some((seq, text)) = output {
-        push(messages, seq, Speaker::Agent, &text);
+        push(messages, seq, &text, Body::Said);
     }
 }
 
-/// Add a message, in parts if it's too long. Keys come from the first entry's
-/// sequence number, which no other message shares.
-fn push(messages: &mut Vec<Outgoing>, seq: Seq, speaker: Speaker, text: &str) {
+/// Add a message, in parts if it's too long.
+fn push(messages: &mut Vec<Outgoing>, seq: Seq, text: &str, body: fn(String) -> Body) {
     if text.trim().is_empty() {
         return;
     }
     for (part, chunk) in chunks(text, MAX_MESSAGE).into_iter().enumerate() {
         messages.push(Outgoing {
-            key: format!("evalien-{seq}-{part}"),
-            speaker,
-            text: chunk.to_owned(),
+            key: key(seq, part),
+            body: body(chunk.to_owned()),
         });
     }
+}
+
+/// Keys come from the first entry's sequence number, which no other message shares.
+fn key(seq: Seq, part: usize) -> String {
+    format!("evalien-{seq}-{part}")
+}
+
+/// Cut text to at most `max` bytes, on a line boundary if there is one.
+fn shorten(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let kept = chunks(text, max)[0].trim_end_matches('\n');
+    format!(
+        "{kept}\n// … {} more bytes; the full source is in the trajectory",
+        text.len() - kept.len()
+    )
 }
 
 /// Split text into pieces of at most `max` bytes, on character boundaries,

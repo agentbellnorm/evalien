@@ -16,7 +16,7 @@ The agent's JavaScript runs in a sandbox: QuickJS compiled to a WebAssembly comp
 - **Evaluation**: the sandbox. It evaluates code as an async function body (`return` to inspect, `globalThis` to keep state) and reports output, timers and results as they happen.
 - **Capabilities**: what the sandbox can reach. `db` is SQL on the agent's database, where it can keep its own tables and read its history but never change the trajectory. `fetch` reaches the public internet only, with addresses checked at connection time.
 - **Harness**: wires the components together. It decides which events wake the model and paces calls when no human is talking. When the day's budget is spent, it records a notice and pauses until midnight UTC.
-- **Chat**: how the human reaches the agent remotely. Their messages become `stdin`; the agent's `console.log` output and the runtime's notices go back. Matrix is the first implementation of the `Chat` port; without one, the terminal is the channel.
+- **Chat**: how the human reaches the agent remotely. Their messages become `stdin`; the code the agent runs (as a highlighted block), its `console.log` output and the runtime's notices go back. Matrix is the first implementation of the `Chat` port; without one, the terminal is the channel.
 
 ## How it fits together
 

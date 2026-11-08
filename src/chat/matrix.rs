@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::domain::Secret;
 
-use super::{Chat, ChatError, Outgoing, Speaker};
+use super::{Body, Chat, ChatError, Outgoing};
 
 /// How long the homeserver may hold a sync open before answering.
 const SYNC_WAIT: Duration = Duration::from_secs(30);
@@ -158,18 +158,31 @@ impl Chat for Matrix {
     }
 
     async fn send(&self, message: &Outgoing) -> Result<(), ChatError> {
-        let msgtype = match message.speaker {
-            Speaker::Agent => "m.text",
-            Speaker::Runtime => "m.notice",
-        };
         // The transaction ID makes a retried send a no-op on the homeserver.
         let url = self.url(&["rooms", &self.config.room, "send", "m.room.message", &message.key]);
-        let request = self
-            .http
-            .put(url)
-            .json(&json!({ "msgtype": msgtype, "body": message.text }));
+        let request = self.http.put(url).json(&content(&message.body));
         self.call(request).await.map(|_| ())
     }
+}
+
+/// How each kind of message looks in a Matrix client. Notices and code are
+/// `m.notice`, which clients show more quietly than the agent's own words.
+/// Code is a highlighted block, with a fenced plain-text fallback.
+fn content(body: &Body) -> serde_json::Value {
+    match body {
+        Body::Said(text) => json!({ "msgtype": "m.text", "body": text }),
+        Body::Notice(text) => json!({ "msgtype": "m.notice", "body": text }),
+        Body::Code(code) => json!({
+            "msgtype": "m.notice",
+            "body": format!("```javascript\n{code}\n```"),
+            "format": "org.matrix.custom.html",
+            "formatted_body": format!("<pre><code class=\"language-javascript\">{}</code></pre>", escape_html(code)),
+        }),
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[derive(Deserialize)]
@@ -266,6 +279,22 @@ mod tests {
         assert_eq!(
             proxied.url(&["sync"]).as_str(),
             "http://synapse:8008/base/_matrix/client/v3/sync"
+        );
+    }
+
+    #[test]
+    fn code_is_a_highlighted_escaped_block_with_a_plain_fallback() {
+        let code = content(&Body::Code("if (a < b && c > d) return '<b>';".into()));
+        assert_eq!(code["msgtype"], "m.notice");
+        assert_eq!(code["format"], "org.matrix.custom.html");
+        assert_eq!(
+            code["formatted_body"],
+            "<pre><code class=\"language-javascript\">if (a &lt; b &amp;&amp; c &gt; d) return '&lt;b&gt;';</code></pre>"
+        );
+        assert_eq!(code["body"], "```javascript\nif (a < b && c > d) return '<b>';\n```");
+        assert_eq!(
+            content(&Body::Said("hi".into())),
+            json!({ "msgtype": "m.text", "body": "hi" })
         );
     }
 

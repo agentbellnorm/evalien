@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use evalien::chat::{self, Chat, ChatError, Matrix, MatrixConfig, Outgoing, Speaker, messages};
+use evalien::chat::{self, Body, Chat, ChatError, Matrix, MatrixConfig, Outgoing, messages};
 use evalien::db::MemoryStore;
 use evalien::domain::{Entry, Event, Outcome, Secret, Seq, Timestamp, Trajectory};
 use reqwest::Url;
@@ -70,14 +70,21 @@ fn start_relay(log: Arc<Trajectory>, failures: u32) -> Relay {
     Relay { log, human, sent }
 }
 
-fn sent(relay: &Relay) -> Vec<(Speaker, String)> {
+fn sent(relay: &Relay) -> Vec<Body> {
     relay
         .sent
         .lock()
         .unwrap()
         .iter()
-        .map(|m| (m.speaker, m.text.clone()))
+        .map(|message| message.body.clone())
         .collect()
+}
+
+fn said(message: &Outgoing) -> &str {
+    match &message.body {
+        Body::Said(text) => text,
+        other => panic!("expected the agent's words, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -126,12 +133,13 @@ async fn output_and_notices_go_out_with_bursts_joined_and_nothing_from_before() 
     })
     .unwrap();
 
-    until("two messages", || relay.sent.lock().unwrap().len() == 2).await;
+    until("three messages", || relay.sent.lock().unwrap().len() == 3).await;
     assert_eq!(
         sent(&relay),
         [
-            (Speaker::Agent, "one\ntwo\nthree".into()),
-            (Speaker::Runtime, "Model calls pause until midnight.".into())
+            Body::Code("work()".into()),
+            Body::Said("one\ntwo\nthree".into()),
+            Body::Notice("Model calls pause until midnight.".into()),
         ]
     );
 }
@@ -157,10 +165,32 @@ fn long_output_goes_out_in_parts_with_distinct_keys() {
     };
     let parts = messages(&[entry]);
     assert!(parts.len() >= 3);
-    assert!(parts.iter().all(|part| part.text.len() <= 30_000));
-    assert_eq!(parts.iter().map(|p| p.text.as_str()).collect::<String>(), text);
+    assert!(parts.iter().all(|part| said(part).len() <= 30_000));
+    assert_eq!(parts.iter().map(said).collect::<String>(), text);
     let keys: Vec<&str> = parts.iter().map(|p| p.key.as_str()).collect();
     assert_eq!(&keys[..2], ["evalien-9-0", "evalien-9-1"]);
+}
+
+#[test]
+fn long_code_is_shortened_into_one_block_and_empty_code_is_skipped() {
+    let code = (0..2000)
+        .map(|i| format!("console.log({i});"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let entry = |seq, code: &str| Entry {
+        seq: Seq::new(seq),
+        timestamp: Timestamp::now(),
+        event: Event::Eval { code: code.into() },
+    };
+    let sent = messages(&[entry(4, &code), entry(5, "  \n")]);
+    assert_eq!(sent.len(), 1);
+    let Body::Code(shown) = &sent[0].body else {
+        panic!("expected code, got {:?}", sent[0].body)
+    };
+    assert!(shown.len() < 8_200, "{}", shown.len());
+    assert!(shown.starts_with("console.log(0);\nconsole.log(1);"));
+    assert!(shown.ends_with("more bytes; the full source is in the trajectory"));
+    assert_eq!(sent[0].key, "evalien-4-0");
 }
 
 /// Just enough of a Matrix homeserver: join, a filtered long-poll sync fed by
@@ -310,21 +340,28 @@ async fn matrix_joins_skips_history_takes_the_owners_messages_and_resumes_after_
 
     let reply = Outgoing {
         key: "evalien-5-0".into(),
-        speaker: Speaker::Agent,
-        text: "hi!".into(),
+        body: Body::Said("hi!".into()),
     };
     let notice = Outgoing {
         key: "evalien-6-0".into(),
-        speaker: Speaker::Runtime,
-        text: "pausing".into(),
+        body: Body::Notice("pausing".into()),
+    };
+    let code = Outgoing {
+        key: "evalien-7-0".into(),
+        body: Body::Code("return 1 < 2".into()),
     };
     matrix.send(&reply).await.unwrap();
     matrix.send(&reply).await.unwrap();
     matrix.send(&notice).await.unwrap();
+    matrix.send(&code).await.unwrap();
     let sent = server.sent.lock().unwrap().clone();
-    assert_eq!(sent.len(), 2, "a resend with the same key is the same message");
+    assert_eq!(sent.len(), 3, "a resend with the same key is the same message");
     assert_eq!(sent["evalien-5-0"], json!({ "msgtype": "m.text", "body": "hi!" }));
     assert_eq!(sent["evalien-6-0"], json!({ "msgtype": "m.notice", "body": "pausing" }));
+    assert_eq!(
+        sent["evalien-7-0"]["formatted_body"],
+        "<pre><code class=\"language-javascript\">return 1 &lt; 2</code></pre>"
+    );
 
     // A restart resumes from the saved position instead of starting over.
     drop(matrix);
