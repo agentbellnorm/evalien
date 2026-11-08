@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::chat::MatrixConfig;
+use crate::connectors::{self, ConnectionConfig};
 use crate::inference::{self, ConfigError, InferenceConfig};
 
 pub struct Config {
@@ -15,6 +16,8 @@ pub struct Config {
     pub human: Human,
     /// Where to serve Prometheus metrics, if anywhere.
     pub metrics: Option<SocketAddr>,
+    /// External services the gateway signs the agent's requests to.
+    pub connections: Vec<ConnectionConfig>,
 }
 
 /// How the human reaches the agent.
@@ -43,6 +46,7 @@ pub fn read(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
         db_path,
         human,
         metrics,
+        connections: connectors::config::read(env).map_err(ConfigError)?,
     })
 }
 

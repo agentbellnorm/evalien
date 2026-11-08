@@ -9,6 +9,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod connectors;
 pub mod db;
 pub mod domain;
 pub mod evaluation;

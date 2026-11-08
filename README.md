@@ -16,6 +16,7 @@ The agent's JavaScript runs in a sandbox: QuickJS compiled to a WebAssembly comp
 - **Evaluation**: the sandbox. It evaluates code as an async function body (`return` to inspect, `globalThis` to keep state) and reports output, timers and results as they happen.
 - **Capabilities**: what the sandbox can reach. `db` is SQL on the agent's database, where it can keep its own tables and read its history but never change the trajectory. `fetch` reaches the public internet only, with addresses checked at connection time.
 - **Harness**: wires the components together. It decides which events wake the model and paces calls when no human is talking. When the day's budget is spent, it records a notice and pauses until midnight UTC.
+- **Connectors**: a credential gateway. Requests the agent sends to a connected service's origins get its credentials attached on the way out; the agent never sees them. API keys today, with OAuth and BankID logins next ([design](docs/connectors.md)).
 - **Chat**: how the human reaches the agent remotely. Their messages become `stdin`; the code the agent runs (as a highlighted block), its `console.log` output and the runtime's notices go back. Matrix is the first implementation of the `Chat` port; without one, the terminal is the channel.
 
 ## How it fits together
@@ -104,6 +105,7 @@ The image is distroless and runs as a non-root user.
 | `MATRIX_ROOM_ID` | | The room to talk in. It must be unencrypted |
 | `MATRIX_OWNER` | | The only user whose messages reach the agent, e.g. `@you:example.org` |
 | `METRICS_ADDR` | | Serve Prometheus metrics at `http://<addr>/metrics`, e.g. `0.0.0.0:9464` |
+| `CONNECTIONS_FILE` | | A TOML file of external services whose requests get credentials; see [docs/connectors.md](docs/connectors.md) |
 
 Variables in `./.env` are read too; the process environment wins.
 

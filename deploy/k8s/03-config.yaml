@@ -11,6 +11,7 @@ data:
   MODEL_BUDGET_USD: "3"
   # Prometheus scrapes this; see the pod annotations and the NetworkPolicy.
   METRICS_ADDR: "0.0.0.0:9464"
+  CONNECTIONS_FILE: /config/connections.toml
   # The in-cluster Synapse service; this traffic never leaves the cluster.
   MATRIX_HOMESERVER: http://matrix-synapse.skum-matrix.svc.cluster.local:8008
   # The room the agent's account has been invited to, exactly as the client
@@ -18,3 +19,18 @@ data:
   # the agent listens to.
   MATRIX_ROOM_ID: "!aYCSALsizJZOlVOtoAtq9EEGY_Tg8dKoISU2qPZ2nVg"
   MATRIX_OWNER: "@morgan:matrix.skum.dev"
+---
+# External services the gateway attaches credentials for. Secrets are named
+# here and live in the evalien-secrets Secret. See docs/connectors.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evalien-connections
+  namespace: evalien
+data:
+  connections.toml: |
+    # [connections.example]
+    # kind = "api_key"
+    # origins = ["https://api.example.com"]
+    # header = { name = "Authorization", value = "Bearer {key}" }
+    # key = { secret = "EXAMPLE_API_KEY" }

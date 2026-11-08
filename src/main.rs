@@ -6,8 +6,9 @@ use anyhow::Context;
 use evalien::{
     chat::{self, Matrix},
     config::{self, Human},
+    connectors::Connectors,
     db::{self, Access, SqliteStore},
-    domain::{TRAJECTORY_TABLE, Timestamp, Trajectory},
+    domain::{Gateway, TRAJECTORY_TABLE, Timestamp, Trajectory},
     evaluation::{
         Capabilities, Limits, Sandbox, SandboxEvaluator, SandboxHost,
         capabilities::{Fetch, Sql},
@@ -49,9 +50,17 @@ async fn run() -> anyhow::Result<u8> {
     let model = Budgeted::daily(inference::connect(config.inference.model)?, budget, spent_today);
 
     // The agent's own handle on the database, with the trajectory read-only.
-    let capabilities = Capabilities::none()
+    // The credential gateway, when there are connections to sign requests for.
+    let connection_names: Vec<String> = config.connections.iter().map(|c| c.name.clone()).collect();
+    let gateway: Option<Arc<dyn Gateway>> =
+        (!config.connections.is_empty()).then(|| Arc::new(Connectors::new(config.connections)) as Arc<dyn Gateway>);
+
+    let mut capabilities = Capabilities::none()
         .with_sql(Sql::open(&config.db_path, TRAJECTORY_TABLE)?)
-        .with_fetch(Fetch::new().map_err(anyhow::Error::msg)?);
+        .with_fetch(Fetch::new(gateway.clone()).map_err(anyhow::Error::msg)?);
+    if let Some(gateway) = &gateway {
+        capabilities = capabilities.with_connections(gateway.clone());
+    }
     let sandbox = Sandbox::new(SandboxHost::new()?, capabilities, limits.clone()).await?;
     let evaluator = SandboxEvaluator::spawn(sandbox, log.clone(), debug);
 
@@ -61,7 +70,11 @@ async fn run() -> anyhow::Result<u8> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("serving metrics on {addr}"))?;
-        let metrics = Arc::new(Metrics::new(budget, spent_today, now));
+        let mut metrics = Metrics::new(budget, spent_today, now);
+        if let Some(gateway) = &gateway {
+            metrics = metrics.with_gateway(gateway.clone());
+        }
+        let metrics = Arc::new(metrics);
         tokio::spawn(metrics::follow(log.clone(), metrics.clone(), log.last_seq(), debug));
         tokio::spawn(metrics::serve(listener, metrics, debug));
     }
@@ -88,6 +101,7 @@ async fn run() -> anyhow::Result<u8> {
         idle_delays: &IDLE_DELAYS,
         soft_limit: limits.soft_slice,
         memory_mib: limits.memory_bytes >> 20,
+        connections: &connection_names,
     });
     let harness = Harness {
         log,

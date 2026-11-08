@@ -41,14 +41,19 @@ never sees a token, a cookie or a key.
 ### The port the fetch capability uses
 
 ```rust
-/// Credentials for outgoing requests, and what responses say about sessions.
 pub trait Gateway: Send + Sync {
-    /// Headers to add for this origin, if a connected connection serves it.
-    fn prepare(&self, request: &OutgoingRequest) -> impl Future<Output = Prepared> + Send;
-    /// Learn from a response: a 401 or a login redirect marks the session expired.
-    fn observe(&self, connection: &ConnectionName, response: &ResponseHead);
+    /// What to add to a request for `origin`.
+    fn attach(&self, origin: &Origin) -> Attachment;
+    /// Learn from how a request went, and return the connection's status afterwards.
+    fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;
+    fn connections(&self) -> Vec<ConnectionInfo>;
 }
 ```
+
+The port is synchronous: attaching credentials is a lookup, never a network
+call. OAuth refreshes happen in the background ahead of expiry, so a request
+never waits on one. Redirects are followed by `fetch` itself, and each hop asks
+the gateway for its own origin.
 
 ### Login types
 
@@ -134,7 +139,7 @@ key = { secret = "EXAMPLE_API_KEY" }
 
 ## Build order
 
-1. **Vault and API keys.** The encrypted vault, the gateway port in `fetch`, origin matching, response stripping, `connections.list()`, metrics.
+1. **Vault and API keys.** *Done.* The encrypted vault, the gateway port in `fetch`, origin matching, response stripping, `connections.list()`, metrics.
 2. **OAuth with Google Calendar.** The callback endpoint and its Tailscale ingress, PKCE, refresh, `connect` for OAuth.
 3. **BankID.** The shared flow and keepalive, then Kivra and the bank as the first providers, once their flows are reverse-engineered.
 4. **Later.** Proton, BankID QR, signing.

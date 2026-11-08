@@ -84,6 +84,11 @@
           run: (sql, ...params) => hostCall("sql", { sql: String(sql), params, mode: "run" }),
         });
         break;
+      case "connections":
+        globalThis.connections = Object.freeze({
+          list: () => hostCall("connections", { op: "list" }),
+        });
+        break;
       case "fetch":
         globalThis.fetch = async (url, init = {}) => {
           const response = await hostCall("fetch", {

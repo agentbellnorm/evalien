@@ -62,7 +62,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: connections
+              mountPath: /config
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: evalien-data
+        - name: connections
+          configMap:
+            name: evalien-connections

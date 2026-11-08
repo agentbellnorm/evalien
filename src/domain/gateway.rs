@@ -1,0 +1,119 @@
+//! The credential gateway, as the rest of the runtime sees it. Connections
+//! attach credentials to the agent's requests by origin, so the agent calls
+//! services directly and never holds a secret.
+
+use std::fmt;
+
+use super::event::Secret;
+
+/// Where a request goes: scheme, host, and port if it isn't the default.
+/// Displays as `https://api.example.com`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Origin(String);
+
+impl Origin {
+    pub fn of(url: &url::Url) -> Self {
+        Origin(url.origin().ascii_serialization())
+    }
+
+    /// An origin written in config: HTTPS, with nothing after the host and port.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let url = url::Url::parse(text).map_err(|e| format!("{text}: {e}"))?;
+        if url.scheme() != "https" {
+            return Err(format!("{text}: credentials only go over https"));
+        }
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+            return Err(format!("{text}: an origin is just https://host[:port]"));
+        }
+        Ok(Origin::of(&url))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionKind {
+    ApiKey,
+}
+
+impl ConnectionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionKind::ApiKey => "api_key",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    /// Requests to its origins carry credentials.
+    Connected,
+    /// The service rejected the credentials, or the session ended.
+    Expired,
+}
+
+impl ConnectionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionStatus::Connected => "connected",
+            ConnectionStatus::Expired => "expired",
+        }
+    }
+}
+
+/// How requests through one connection have gone since the process started.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RequestCounts {
+    pub succeeded: u64,
+    pub rejected: u64,
+    pub client_errors: u64,
+    pub server_errors: u64,
+    pub failed: u64,
+}
+
+/// A connection and its state, for the agent and for metrics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionInfo {
+    pub name: String,
+    pub kind: ConnectionKind,
+    pub status: ConnectionStatus,
+    pub origins: Vec<Origin>,
+    pub requests: RequestCounts,
+}
+
+/// What the gateway adds to one request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Attachment {
+    /// No connection serves this origin: the request goes out as written.
+    Nothing,
+    /// Headers that replace any of the same name the agent set.
+    Credentials {
+        connection: String,
+        headers: Vec<(String, Secret)>,
+    },
+}
+
+/// How a request through a connection ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Status(u16),
+    /// No response: DNS, connection or timeout.
+    Failed,
+}
+
+pub trait Gateway: Send + Sync {
+    /// What to add to a request for `origin`.
+    fn attach(&self, origin: &Origin) -> Attachment;
+    /// Learn from how a request through `connection` went, and return the
+    /// connection's status afterwards.
+    fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;
+    fn connections(&self) -> Vec<ConnectionInfo>;
+}

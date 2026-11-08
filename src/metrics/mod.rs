@@ -15,7 +15,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::domain::{Entry, Event, Generation, Outcome, Seq, Timestamp, Trajectory, Usd};
+use crate::domain::{ConnectionStatus, Entry, Event, Gateway, Generation, Outcome, Seq, Timestamp, Trajectory, Usd};
 
 pub use exposition::Histogram;
 pub use http::serve;
@@ -31,6 +31,8 @@ type ModelKey = (String, String);
 pub struct Metrics {
     budget: Usd,
     state: Mutex<State>,
+    /// Connections, whose request counts the gateway keeps.
+    gateway: Option<Arc<dyn Gateway>>,
 }
 
 struct State {
@@ -62,6 +64,15 @@ impl Metrics {
         Metrics {
             budget,
             state: Mutex::new(state),
+            gateway: None,
+        }
+    }
+
+    /// Also report on the gateway's connections.
+    pub fn with_gateway(self, gateway: Arc<dyn Gateway>) -> Self {
+        Metrics {
+            gateway: Some(gateway),
+            ..self
         }
     }
 
@@ -168,6 +179,41 @@ impl Metrics {
             "Evaluations started and not yet settled.",
             [(vec![], state.started.len() as f64)],
         );
+        if let Some(gateway) = &self.gateway {
+            let connections = gateway.connections();
+            out.counter(
+                "evalien_connection_requests_total",
+                "Requests through each connection, by outcome: succeeded, rejected (401/403), client_error, server_error, failed.",
+                connections.iter().flat_map(|connection| {
+                    let r = connection.requests;
+                    [
+                        ("succeeded", r.succeeded),
+                        ("rejected", r.rejected),
+                        ("client_error", r.client_errors),
+                        ("server_error", r.server_errors),
+                        ("failed", r.failed),
+                    ]
+                    .map(|(outcome, n)| {
+                        let labels = vec![("connection", connection.name.clone()), ("outcome", outcome.to_owned())];
+                        (labels, n as f64)
+                    })
+                }),
+            );
+            out.gauge(
+                "evalien_connection_connected",
+                "Whether each connection is connected (1) or needs a login (0).",
+                connections.iter().map(|connection| {
+                    let labels = vec![
+                        ("connection", connection.name.clone()),
+                        ("kind", connection.kind.as_str().to_owned()),
+                    ];
+                    (
+                        labels,
+                        f64::from(u8::from(connection.status == ConnectionStatus::Connected)),
+                    )
+                }),
+            );
+        }
         out.finish()
     }
 }

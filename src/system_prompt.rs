@@ -10,6 +10,8 @@ pub struct Facts<'a> {
     pub idle_delays: &'a [Duration],
     pub soft_limit: Duration,
     pub memory_mib: usize,
+    /// Services the gateway signs requests to, if any.
+    pub connections: &'a [String],
 }
 
 fn duration(d: Duration) -> String {
@@ -31,6 +33,14 @@ pub fn build(facts: &Facts<'_>) -> String {
         ),
         _ => String::new(),
     };
+    let connections = if facts.connections.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n- connections.list() returns the services connected for you ({}), with their origins and status. Requests you fetch to those origins are signed for you; you never see the credentials. A response with an x-evalien-connection header means that connection needs attention.",
+            facts.connections.join(", ")
+        )
+    };
     let table = facts.table;
     let channel = facts.channel;
     let soft = facts.soft_limit.as_secs_f64();
@@ -43,7 +53,7 @@ Code runs as an async function body: use await freely, return values for inspect
 
 The runtime is QuickJS (ES2023): standard JavaScript with console, setTimeout, setInterval and their clear functions. It is not Node.js or a browser: there is no require, import, process, Buffer, filesystem or DOM. These async functions are your only way out:
 - db.query(sql, ...params) returns rows as objects; db.run(sql, ...params) returns {{changes, lastInsertRowid}}. One statement per call.
-- fetch(url, {{method, headers, body}}) returns {{ok, status, url, headers, text(), json()}}. Only public internet hosts are reachable, and bodies are text.
+- fetch(url, {{method, headers, body}}) returns {{ok, status, url, headers, text(), json()}}. Only public internet hosts are reachable, and bodies are text.{connections}
 
 You receive a chronological trajectory of observable events:
 - start: a fresh runtime. Earlier live bindings, callbacks, and connections are gone.

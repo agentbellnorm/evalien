@@ -360,7 +360,7 @@ async fn the_agent_cannot_change_its_history_or_reach_other_files() {
 #[tokio::test]
 async fn fetch_refuses_anything_but_the_public_internet() {
     let mut rig = Rig::new(
-        Capabilities::none().with_fetch(Fetch::new().unwrap()),
+        Capabilities::none().with_fetch(Fetch::new(None).unwrap()),
         Limits::default(),
     )
     .await;
