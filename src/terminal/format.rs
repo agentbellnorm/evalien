@@ -1,23 +1,36 @@
 //! Colors and symbols for the terminal.
 
+use std::{io::IsTerminal, sync::OnceLock};
+
 use crate::domain::Timestamp;
 
-const RESET: &str = "\x1b[0m";
+/// Colors only for a person at a terminal; logs (a pod's, say) stay plain.
+fn paint(code: &str, text: &str) -> String {
+    static COLORS: OnceLock<bool> = OnceLock::new();
+    let colors = *COLORS.get_or_init(|| {
+        std::io::stdout().is_terminal() && std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    });
+    if colors {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
 
 pub fn dim(text: &str) -> String {
-    format!("\x1b[90m{text}{RESET}")
+    paint("90", text)
 }
 
 pub fn red(text: &str) -> String {
-    format!("\x1b[31m{text}{RESET}")
+    paint("31", text)
 }
 
 pub fn green(text: &str) -> String {
-    format!("\x1b[32m{text}{RESET}")
+    paint("32", text)
 }
 
 pub fn yellow(text: &str) -> String {
-    format!("\x1b[33m{text}{RESET}")
+    paint("33", text)
 }
 
 pub const BOLT: &str = "\u{26a1}";

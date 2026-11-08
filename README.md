@@ -15,7 +15,8 @@ The agent's JavaScript runs in a sandbox: QuickJS compiled to a WebAssembly comp
 - **Inference**: renders a cached window of the trajectory into a prompt and gets `{ code }` back through structured output. Anthropic, OpenAI and Gemini over their HTTP APIs, with pacing and a spend budget.
 - **Evaluation**: the sandbox. It evaluates code as an async function body (`return` to inspect, `globalThis` to keep state) and reports output, timers and results as they happen.
 - **Capabilities**: what the sandbox can reach. `db` is SQL on the agent's database, where it can keep its own tables and read its history but never change the trajectory. `fetch` reaches the public internet only, with addresses checked at connection time.
-- **Harness**: wires the components together. It decides which events wake the model and paces calls when no human is talking.
+- **Harness**: wires the components together. It decides which events wake the model and paces calls when no human is talking. When the day's budget is spent, it records a notice and pauses until midnight UTC.
+- **Chat**: how the human reaches the agent remotely. Their messages become `stdin`; the agent's `console.log` output and the runtime's notices go back. Matrix is the first implementation of the `Chat` port; without one, the terminal is the channel.
 
 ## How it fits together
 
@@ -93,13 +94,42 @@ The image is distroless and runs as a non-root user.
 | --- | --- | --- |
 | `MODEL` | `anthropic/claude-sonnet-5-5` | `anthropic/…`, `openai/…`, or `google/…` |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` | | Only the selected provider's key is needed |
-| `MODEL_BUDGET_USD` | `1` | Spend cap per process; the process exits with status 2 once it's reached |
+| `MODEL_BUDGET_USD` | `1` | Spend cap per UTC day, counted from the recorded calls so restarts don't reset it. Once it's spent, model calls pause until midnight |
 | `MODEL_PRICING` | | `input,output[,cacheRead,cacheWrite]` in USD/M tokens, required for unpriced models |
 | `MODEL_MAX_OUTPUT_TOKENS` | `16000` | |
 | `MODEL_BASE_URL` | | Overrides the provider's API base URL |
 | `AGENT_DB_PATH` | `/data/agent.db` | |
+| `MATRIX_HOMESERVER` | | Enables Matrix; the terminal is the channel otherwise |
+| `MATRIX_ACCESS_TOKEN` | | The agent's own Matrix account |
+| `MATRIX_ROOM_ID` | | The room to talk in. It must be unencrypted |
+| `MATRIX_OWNER` | | The only user whose messages reach the agent, e.g. `@you:example.org` |
 
 Variables in `./.env` are read too; the process environment wins.
+
+## Deploying to Kubernetes
+
+The manifests in [`deploy/k8s/`](deploy/k8s/) run one pod with a Longhorn volume for `/data`, talking over the in-cluster Synapse. They hold no secrets.
+
+1. Give the agent a Matrix account, and get its access token:
+   ```
+   kubectl -n skum-matrix exec -it deploy/matrix-synapse -- \
+     register_new_matrix_user http://localhost:8008 -c /theconfig/homeserver.yaml -u evalien --no-admin
+   curl -s https://matrix.skum.dev/_matrix/client/v3/login -d \
+     '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"evalien"},"password":"…"}'
+   ```
+2. From your own account, create an unencrypted room and invite the agent's account. Put the room ID (Room settings → Advanced) and your user ID in `deploy/k8s/03-config.yaml`.
+3. Build and push the image (arm64), then create the namespace and the Secret:
+   ```
+   podman build --platform linux/arm64 -t registry.bushnet.diy/evalien:0.1.0 .
+   podman push registry.bushnet.diy/evalien:0.1.0
+   kubectl apply -f deploy/k8s/01-namespace.yaml
+   kubectl -n evalien create secret generic evalien-secrets \
+     --from-literal=ANTHROPIC_API_KEY=… --from-literal=MATRIX_ACCESS_TOKEN=…
+   kubectl apply -f deploy/k8s/
+   ```
+4. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
+
+The pod runs as non-root with a read-only root filesystem, no capabilities, no service account token, and a NetworkPolicy that allows only DNS, Synapse, and public HTTP(S).
 
 ## Reports
 

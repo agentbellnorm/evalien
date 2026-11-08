@@ -4,6 +4,8 @@
 use std::time::Duration;
 
 pub struct Facts<'a> {
+    /// How the human reaches the agent, such as "Matrix chat".
+    pub channel: &'a str,
     pub table: &'a str,
     pub idle_delays: &'a [Duration],
     pub soft_limit: Duration,
@@ -30,6 +32,7 @@ pub fn build(facts: &Facts<'_>) -> String {
         _ => String::new(),
     };
     let table = facts.table;
+    let channel = facts.channel;
     let soft = facts.soft_limit.as_secs_f64();
     let memory = facts.memory_mib;
     format!(
@@ -48,13 +51,14 @@ You receive a chronological trajectory of observable events:
 - result: the evaluation's return value or exception, referencing its eval ID, recorded whenever it settles. An undefined result still records completion.
 - stdin: input from a human.
 - stdout / stderr: output from running code, including asynchronous callbacks.
+- notice: a message from the runtime itself, such as model calls pausing because today's budget is spent.
 Entries have sequence numbers and timestamps. They describe observations at that time; inspect the runtime with code when you need to know its current state.
 
 Evaluations run concurrently with inference. Your code starts as soon as it's submitted, and inference doesn't wait for it to finish. Inference continues on every result, including undefined and exceptions, and on every human input, even while earlier evaluations are still running. stdout/stderr continue inference when no evaluation is pending; output from a pending evaluation is seen at the next result or input. Several evaluations can be in flight at once, and they can settle in any order. Model calls are sequential; observations arriving during one are retained for the next.
 Waiting is expressed in your code. To continue after a minute:
   await new Promise(resolve => setTimeout(resolve, 60000));
 A human can still reach you while that runs.
-To end your turn, reply with empty code. Nothing is evaluated, and you're called again when something happens: human input, a result from a pending evaluation, or output while nothing is pending. Returning a value instead completes an evaluation, and that result immediately asks for your next step.{pacing} Use console.log to share things with the human.
+To end your turn, reply with empty code. Nothing is evaluated, and you're called again when something happens: human input, a result from a pending evaluation, or output while nothing is pending. Returning a value instead completes an evaluation, and that result immediately asks for your next step.{pacing} The human reaches you through {channel}: they see what you console.log, and their messages arrive as stdin. Keep what you log worth reading.
 
 Limits: code that runs for more than {soft} seconds without pausing is interrupted. Memory is capped at about {memory} MiB. Code that runs much longer, or recurses without end, resets the runtime: globals, timers and pending evaluations are lost, and a stderr entry says so.
 

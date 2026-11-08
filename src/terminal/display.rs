@@ -46,6 +46,7 @@ pub fn line(entry: &Entry) -> Option<Line> {
         Event::Eval { code } => Some(Line::Out(dim(&format!("{BOLT} {}", code.replace('\n', "\n  "))))),
         Event::Stdout { text } => Some(Line::Out(text.clone())),
         Event::Stderr { text } => Some(Line::Err(text.clone())),
+        Event::Notice { text } => Some(Line::Err(format!("[evalien] {text}"))),
         Event::Result {
             outcome: Outcome::Throw,
             text,

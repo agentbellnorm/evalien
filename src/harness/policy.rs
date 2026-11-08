@@ -23,7 +23,7 @@ pub fn wakes(event: &Event, pending: usize) -> bool {
     match event {
         Event::Start | Event::Stdin { .. } | Event::Result { .. } => true,
         Event::Stdout { .. } | Event::Stderr { .. } => pending == 0,
-        Event::Eval { .. } | Event::Generation { .. } => false,
+        Event::Eval { .. } | Event::Generation { .. } | Event::Notice { .. } => false,
     }
 }
 
@@ -35,7 +35,8 @@ pub fn from_human(event: &Event) -> bool {
         | Event::Stdout { .. }
         | Event::Stderr { .. }
         | Event::Result { .. }
-        | Event::Generation { .. } => false,
+        | Event::Generation { .. }
+        | Event::Notice { .. } => false,
     }
 }
 

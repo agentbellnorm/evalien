@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::domain::{FinishReason, GenerateError, Generation, Model, Prompt, Reply};
 
 pub use anthropic::Anthropic;
-pub use budget::Budgeted;
+pub use budget::{Budgeted, spent_on_day};
 pub use config::{ConfigError, InferenceConfig, ModelConfig, Provider};
 pub use google::Google;
 pub use openai::OpenAi;
@@ -137,14 +137,13 @@ fn endpoint(base: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::config::ApiKey;
     use crate::inference::pricing::Pricing;
 
     pub fn config(provider: Provider, model: &str) -> ModelConfig {
         ModelConfig {
             provider,
             model: model.into(),
-            api_key: ApiKey::new("test-key"),
+            api_key: crate::domain::Secret::new("test-key"),
             base_url: None,
             max_output_tokens: 1000,
             pricing: Pricing {

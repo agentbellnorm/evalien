@@ -52,6 +52,9 @@ enum WireEvent {
     Stderr {
         text: String,
     },
+    Notice {
+        text: String,
+    },
     Result {
         #[serde(rename = "evalId")]
         eval_id: u64,
@@ -108,6 +111,7 @@ impl From<&Event> for WireEvent {
             Event::Stdin { text } => WireEvent::Stdin { text },
             Event::Stdout { text } => WireEvent::Stdout { text },
             Event::Stderr { text } => WireEvent::Stderr { text },
+            Event::Notice { text } => WireEvent::Notice { text },
             Event::Result { eval, outcome, text } => WireEvent::Result {
                 eval_id: eval.get(),
                 outcome: match outcome {
@@ -152,6 +156,7 @@ impl TryFrom<WireEvent> for Event {
             WireEvent::Stdin { text } => Event::Stdin { text },
             WireEvent::Stdout { text } => Event::Stdout { text },
             WireEvent::Stderr { text } => Event::Stderr { text },
+            WireEvent::Notice { text } => Event::Notice { text },
             WireEvent::Result { eval_id, outcome, text } => {
                 if eval_id == 0 {
                     return Err("a result must reference a positive evaluation ID".into());

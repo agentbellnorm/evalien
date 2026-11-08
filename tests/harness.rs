@@ -5,13 +5,13 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use evalien::db::MemoryStore;
 use evalien::domain::{
     Evaluator, EvaluatorStopped, Event, FinishReason, GenerateError, Generation, Model, Outcome, Prompt, Reply, Seq,
-    Trajectory, Usage, Usd,
+    Timestamp, Trajectory, Usage, Usd,
 };
 use evalien::harness::{Harness, Stopped, context::render_entry};
 use tokio::sync::{mpsc, oneshot};
@@ -185,6 +185,7 @@ fn kind(event: &Event) -> &'static str {
         Event::Stderr { .. } => "stderr",
         Event::Result { .. } => "result",
         Event::Generation { .. } => "generation",
+        Event::Notice { .. } => "notice",
     }
 }
 
@@ -357,12 +358,37 @@ async fn a_billed_call_without_source_is_recorded_then_stops_the_harness() {
 async fn other_errors_stop_the_harness_without_a_recorded_call() {
     let mut rig = Rig::start(vec![]);
     let call = rig.next_call().await;
-    let budget = GenerateError::BudgetSpent {
-        spent: Usd::new(1.5).unwrap(),
-        budget: Usd::new(1.0).unwrap(),
-    };
-    let _ = call.reply.send(Err(budget.clone()));
+    let failed = GenerateError::Failed("connection refused".into());
+    let _ = call.reply.send(Err(failed.clone()));
     let stopped = (&mut rig.done).await.unwrap();
-    assert!(matches!(stopped, Stopped::Generation(e) if e == budget));
+    assert!(matches!(stopped, Stopped::Generation(e) if e == failed));
     assert_eq!(rig.types(), ["start"]);
+}
+
+#[tokio::test]
+async fn a_spent_budget_pauses_with_a_notice_and_resumes_with_what_arrived_meanwhile() {
+    let mut rig = Rig::start(vec![]);
+    let call = rig.next_call().await;
+    let resumes_at = Timestamp::from_system_time(SystemTime::now() + Duration::from_millis(200));
+    let spent = GenerateError::BudgetSpent {
+        spent: Usd::new(1.2).unwrap(),
+        budget: Usd::new(1.0).unwrap(),
+        resumes_at,
+    };
+    let paused = Instant::now();
+    let _ = call.reply.send(Err(spent));
+    rig.until(|r| r.types().contains(&"notice")).await;
+    rig.type_line("are you there?");
+
+    let call = rig.next_call().await;
+    assert!(
+        paused.elapsed() >= Duration::from_millis(150),
+        "resumed after {:?}",
+        paused.elapsed()
+    );
+    assert!(!rig.done.is_finished());
+    assert_eq!(rig.types(), ["start", "notice", "stdin"]);
+    assert_eq!(call.prompt.blocks, rig.latest());
+    let notice = rig.log.read_all().unwrap().remove(1).event;
+    assert!(matches!(notice, Event::Notice { text } if text.contains("budget is spent")));
 }

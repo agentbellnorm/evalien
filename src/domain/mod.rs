@@ -6,7 +6,7 @@ mod event;
 mod ports;
 mod trajectory;
 
-pub use event::{Entry, Event, FinishReason, Generation, Outcome, Seq, Timestamp, Usage, Usd};
+pub use event::{Entry, Event, FinishReason, Generation, Outcome, Secret, Seq, Timestamp, Usage, Usd};
 pub use ports::{Evaluator, EvaluatorStopped, GenerateError, Model, Prompt, Reply};
 pub use trajectory::{RecordStore, StoreError, StoredRecord, Trajectory, TrajectoryError};
 

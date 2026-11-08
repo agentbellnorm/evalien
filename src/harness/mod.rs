@@ -8,11 +8,11 @@ pub mod policy;
 use std::{
     convert::Infallible,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::domain::{
-    Entry, Evaluator, EvaluatorStopped, Event, GenerateError, Model, Prompt, Seq, Trajectory, TrajectoryError,
+    Entry, Evaluator, EvaluatorStopped, Event, GenerateError, Model, Prompt, Reply, Seq, Trajectory, TrajectoryError,
 };
 
 pub struct Harness<M, E> {
@@ -98,31 +98,7 @@ impl<M: Model, E: Evaluator> Harness<M, E> {
                 self.pace(&mut attention).await?;
             }
 
-            // A fixed prefix: anything arriving during generation stays after
-            // the cursor for the next iteration.
-            let through = attention.cursor;
-            (self.debug)(&format!("thinking... (through event {through})"));
-            attention.last_call = Some(Instant::now());
-            let prompt = Prompt {
-                instructions: self.instructions.clone(),
-                blocks: context::prompt_window(&self.log, through)?,
-            };
-            let reply = match self.model.generate(&prompt).await {
-                Ok(reply) => reply,
-                Err(error) => {
-                    if let GenerateError::Unusable { generation, .. } = &error {
-                        self.log.append(Event::Generation {
-                            through,
-                            generation: generation.clone(),
-                        })?;
-                    }
-                    return Err(error.into());
-                }
-            };
-            self.log.append(Event::Generation {
-                through,
-                generation: reply.generation,
-            })?;
+            let reply = self.call_model(&mut attention).await?;
             // No code ends the turn. The next waking observation starts another.
             if reply.code.trim().is_empty() {
                 (self.debug)("idle until the next event");
@@ -132,6 +108,59 @@ impl<M: Model, E: Evaluator> Harness<M, E> {
                 code: reply.code.clone(),
             })?;
             self.evaluator.start(eval.seq, reply.code).await?;
+        }
+    }
+
+    /// Call the model with the trajectory through the cursor, and record the
+    /// call. When today's budget is spent, tell the human and wait for it to
+    /// reset; anything that arrives meanwhile is part of the next prompt.
+    async fn call_model(&self, attention: &mut Attention) -> Result<Reply, Stopped> {
+        loop {
+            // A fixed prefix: anything arriving during generation stays after
+            // the cursor for the next iteration.
+            let through = attention.cursor;
+            (self.debug)(&format!("thinking... (through event {through})"));
+            attention.last_call = Some(Instant::now());
+            let prompt = Prompt {
+                instructions: self.instructions.clone(),
+                blocks: context::prompt_window(&self.log, through)?,
+            };
+            match self.model.generate(&prompt).await {
+                Ok(reply) => {
+                    let generation = reply.generation.clone();
+                    self.log.append(Event::Generation { through, generation })?;
+                    return Ok(reply);
+                }
+                Err(GenerateError::BudgetSpent {
+                    spent,
+                    budget,
+                    resumes_at,
+                }) => {
+                    let text = format!(
+                        "Today's model budget is spent ({spent} of {budget}). Model calls pause until {resumes_at}."
+                    );
+                    (self.debug)(&text);
+                    self.log.append(Event::Notice { text })?;
+                    let wait = resumes_at
+                        .as_system_time()
+                        .duration_since(SystemTime::now())
+                        .unwrap_or_default();
+                    tokio::time::sleep(wait).await;
+                    let arrived = self.log.read(attention.cursor, self.log.last_seq())?;
+                    attention.cursor = arrived.last().map_or(attention.cursor, |entry| entry.seq);
+                    attention.observe(&arrived);
+                }
+                Err(error) => {
+                    // A billed call is recorded even when it produced nothing usable.
+                    if let GenerateError::Unusable { generation, .. } = &error {
+                        self.log.append(Event::Generation {
+                            through,
+                            generation: generation.clone(),
+                        })?;
+                    }
+                    return Err(error.into());
+                }
+            }
         }
     }
 

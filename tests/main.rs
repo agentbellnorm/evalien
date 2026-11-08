@@ -197,29 +197,38 @@ async fn sigterm_stops_the_process_during_generation_and_leaves_the_database_rea
 }
 
 #[tokio::test]
-async fn spending_the_budget_stops_the_process_with_status_2_after_recording_the_calls() {
+async fn a_spent_budget_pauses_with_a_notice_and_a_restart_remembers_todays_spend() {
     let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.db");
+    let notices = |path: &Path| {
+        events(path)
+            .iter()
+            .filter(|e| matches!(e, Event::Notice { .. }))
+            .count()
+    };
     // 10,000 output tokens at $10 per million is $0.10, over the $0.01 budget.
-    let (base, _) = fake_model(Behavior::Reply {
+    let (base, calls) = fake_model(Behavior::Reply {
         code: "return 1",
         output_tokens: 10_000,
     })
     .await;
     let agent = start_agent(dir.path(), &base, "0.01");
-    let (status, stderr) = exit_code(agent).await;
-    assert_eq!(status, Some(2), "{stderr}");
-    assert!(stderr.contains("budget"), "{stderr}");
-    let recorded = events(&dir.path().join("agent.db"));
-    assert_eq!(
-        recorded
-            .iter()
-            .filter(|e| matches!(e, Event::Generation { .. }))
-            .count(),
-        1
-    );
+    until("the pause notice", || notices(&path) == 1).await;
+    // The agent stays up, paused, instead of exiting into a restart loop.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    signal(&agent, "TERM");
+    assert_eq!(exit_code(agent).await.0, Some(143));
     assert!(
-        recorded
+        events(&path)
             .iter()
             .any(|e| matches!(e, Event::Result { text, .. } if text == "1"))
     );
+
+    // A restarted pod knows today's spend and doesn't call the model.
+    let restarted = start_agent(dir.path(), &base, "0.01");
+    until("the second pause notice", || notices(&path) == 2).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    signal(&restarted, "TERM");
+    assert_eq!(exit_code(restarted).await.0, Some(143));
 }

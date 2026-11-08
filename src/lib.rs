@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat;
 pub mod config;
 pub mod db;
 pub mod domain;

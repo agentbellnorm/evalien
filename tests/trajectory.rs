@@ -48,6 +48,9 @@ fn events() -> Vec<Event> {
                 },
             },
         },
+        Event::Notice {
+            text: "Model calls pause until midnight.".into(),
+        },
     ]
 }
 

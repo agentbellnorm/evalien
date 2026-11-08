@@ -8,6 +8,11 @@ RUN arch="$(uname -m | sed 's/aarch64/arm64/')" \
 ENV WASI_SDK=/opt/wasi-sdk
 WORKDIR /src
 COPY . .
+# Fit small builders (a 2 GB VM, a Pi): fewer parallel jobs and thin LTO
+# instead of the local release profile's single-unit fat LTO.
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 RUN cargo build --release --locked --bins && mkdir /data
 
 # Run: no shell, no package manager, not root.

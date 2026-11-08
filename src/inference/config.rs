@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fmt};
+use std::collections::HashMap;
 
-use crate::domain::Usd;
+use crate::domain::{Secret, Usd};
 
 use super::pricing::Pricing;
 
@@ -39,31 +39,11 @@ impl Provider {
     }
 }
 
-/// A credential. Never printed, and never handed to evaluated code.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ApiKey(String);
-
-impl ApiKey {
-    pub fn new(key: impl Into<String>) -> Self {
-        ApiKey(key.into())
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ApiKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ApiKey(…)")
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelConfig {
     pub provider: Provider,
     pub model: String,
-    pub api_key: ApiKey,
+    pub api_key: Secret,
     pub base_url: Option<String>,
     pub max_output_tokens: u32,
     pub pricing: Pricing,
@@ -79,7 +59,7 @@ impl ModelConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InferenceConfig {
     pub model: ModelConfig,
-    /// Spend cap for this process.
+    /// Spend cap per UTC day.
     pub budget: Usd,
 }
 
@@ -142,7 +122,7 @@ pub fn read(env: &HashMap<String, String>) -> Result<InferenceConfig, ConfigErro
         model: ModelConfig {
             provider,
             model: model.to_owned(),
-            api_key: ApiKey::new(api_key),
+            api_key: Secret::new(api_key),
             base_url: env.get("MODEL_BASE_URL").cloned(),
             max_output_tokens,
             pricing,

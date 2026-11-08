@@ -2,3 +2,4 @@ target
 .tools
 .env
 agent.db*
+node_modules

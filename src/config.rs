@@ -1,18 +1,40 @@
 //! Everything the agent reads from the environment.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
+use crate::chat::MatrixConfig;
 use crate::inference::{self, ConfigError, InferenceConfig};
 
 pub struct Config {
     pub db_path: PathBuf,
     pub inference: InferenceConfig,
+    pub human: Human,
+}
+
+/// How the human reaches the agent.
+pub enum Human {
+    /// Typing into this process's terminal.
+    Terminal,
+    Matrix(MatrixConfig),
 }
 
 pub fn read(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
+    let db_path = db_path(env);
+    let state_dir = db_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let human = match MatrixConfig::read(env, state_dir).map_err(ConfigError)? {
+        Some(matrix) => Human::Matrix(matrix),
+        None => Human::Terminal,
+    };
     Ok(Config {
-        db_path: db_path(env),
         inference: inference::config::read(env)?,
+        db_path,
+        human,
     })
 }
 

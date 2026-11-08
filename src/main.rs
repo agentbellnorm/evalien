@@ -4,15 +4,16 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use evalien::{
-    config,
+    chat::{self, Matrix},
+    config::{self, Human},
     db::{self, Access, SqliteStore},
-    domain::{GenerateError, TRAJECTORY_TABLE, Trajectory},
+    domain::{TRAJECTORY_TABLE, Timestamp, Trajectory},
     evaluation::{
         Capabilities, Limits, Sandbox, SandboxEvaluator, SandboxHost,
         capabilities::{Fetch, Sql},
     },
     harness::{Harness, Stopped, policy::IDLE_DELAYS},
-    inference::{self, Budgeted},
+    inference::{self, Budgeted, spent_on_day},
     lifecycle, system_prompt,
     terminal::{display, format::debug, input},
 };
@@ -39,7 +40,13 @@ async fn run() -> anyhow::Result<u8> {
         .with_context(|| format!("opening {}", config.db_path.display()))?;
     let log = Arc::new(Trajectory::new(SqliteStore::new(connection, TRAJECTORY_TABLE)?)?);
 
-    let model = Budgeted::new(inference::connect(config.inference.model)?, config.inference.budget);
+    // Today's spend so far comes from the recorded calls, so restarts don't reset it.
+    let spent_today = spent_on_day(&log.read_all()?, Timestamp::now());
+    let model = Budgeted::daily(
+        inference::connect(config.inference.model)?,
+        config.inference.budget,
+        spent_today,
+    );
 
     // The agent's own handle on the database, with the trajectory read-only.
     let capabilities = Capabilities::none()
@@ -48,15 +55,27 @@ async fn run() -> anyhow::Result<u8> {
     let sandbox = Sandbox::new(SandboxHost::new()?, capabilities, limits.clone()).await?;
     let evaluator = SandboxEvaluator::spawn(sandbox, log.clone(), debug);
 
+    // The trajectory as it grows: on the terminal, or in the pod's log.
     tokio::spawn(display::show(log.clone(), log.last_seq()));
-    let typed = log.clone();
-    tokio::spawn(async move {
-        if let Err(error) = input::forward_lines(tokio::io::BufReader::new(tokio::io::stdin()), &typed).await {
-            debug(&format!("input stopped: {error}"));
+    let channel = match config.human {
+        Human::Terminal => {
+            let typed = log.clone();
+            tokio::spawn(async move {
+                if let Err(error) = input::forward_lines(tokio::io::BufReader::new(tokio::io::stdin()), &typed).await {
+                    debug(&format!("input stopped: {error}"));
+                }
+            });
+            "the terminal running this process"
         }
-    });
+        Human::Matrix(matrix) => {
+            let chat = Matrix::connect(matrix).await.context("connecting to Matrix")?;
+            tokio::spawn(chat::relay(chat, log.clone(), debug));
+            "a Matrix chat room"
+        }
+    };
 
     let instructions = system_prompt::build(&system_prompt::Facts {
+        channel,
         table: TRAJECTORY_TABLE,
         idle_delays: &IDLE_DELAYS,
         soft_limit: limits.soft_slice,
@@ -81,16 +100,8 @@ async fn run() -> anyhow::Result<u8> {
     }
 }
 
-/// Spending the budget is an expected stop; anything else is a failure.
+/// The harness only stops on failure: a spent budget pauses it instead.
 fn report(stopped: Stopped) -> u8 {
-    match stopped {
-        Stopped::Generation(GenerateError::BudgetSpent { .. }) => {
-            eprintln!("\n{stopped}. Stopping.");
-            2
-        }
-        _ => {
-            eprintln!("\nevalien stopped: {stopped}");
-            1
-        }
-    }
+    eprintln!("\nevalien stopped: {stopped}");
+    1
 }

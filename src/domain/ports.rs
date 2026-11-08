@@ -3,7 +3,7 @@
 
 use std::future::Future;
 
-use super::event::{Generation, Seq, Usd};
+use super::event::{Generation, Seq, Timestamp, Usd};
 
 /// What the model sees: fixed instructions, then the trajectory as text blocks.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,9 +27,13 @@ pub enum GenerateError {
     /// The call failed before producing a billed reply.
     #[error("generation failed: {0}")]
     Failed(String),
-    /// This process has spent its budget.
-    #[error("spent {spent} of this process's {budget} budget")]
-    BudgetSpent { spent: Usd, budget: Usd },
+    /// Today's budget is spent. Calls can resume at `resumes_at`.
+    #[error("spent {spent} of the daily {budget} budget; resuming at {resumes_at}")]
+    BudgetSpent {
+        spent: Usd,
+        budget: Usd,
+        resumes_at: Timestamp,
+    },
 }
 
 pub trait Model: Send + Sync {

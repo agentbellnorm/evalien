@@ -22,6 +22,7 @@ pub fn render_entry(entry: &Entry) -> String {
         Event::Stdin { text } => ("stdin".to_owned(), text.clone()),
         Event::Stdout { text } => ("stdout".to_owned(), text.clone()),
         Event::Stderr { text } => ("stderr".to_owned(), text.clone()),
+        Event::Notice { text } => ("notice".to_owned(), text.clone()),
         Event::Result { eval, outcome, text } => (format!("result eval={eval} {}", outcome.as_str()), text.clone()),
         Event::Generation { through, generation } => {
             let u = &generation.usage;

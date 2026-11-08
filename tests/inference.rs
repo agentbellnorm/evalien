@@ -1,10 +1,13 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use evalien::domain::{FinishReason, GenerateError, Generation, Model, Prompt, Reply, Usage, Usd};
+use evalien::domain::{
+    Entry, Event, FinishReason, GenerateError, Generation, Model, Prompt, Reply, Seq, Timestamp, Usage, Usd,
+};
 use evalien::inference::{
     Budgeted, Provider, config,
     pricing::{Pricing, Tokens},
+    spent_on_day,
 };
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -37,7 +40,7 @@ fn model_configuration_validates_selection_and_only_requires_the_selected_provid
     assert_eq!(selected.model.provider, Provider::Anthropic);
     assert_eq!(selected.model.id(), "anthropic/claude-sonnet-5-5");
     assert_eq!(selected.model.api_key.expose(), "key");
-    assert_eq!(format!("{:?}", selected.model.api_key), "ApiKey(…)");
+    assert_eq!(format!("{:?}", selected.model.api_key), "Secret(…)");
     assert_eq!(selected.budget, Usd::new(1.0).unwrap());
 
     let openai = config::read(&env(&[
@@ -118,9 +121,19 @@ impl Model for Fixed {
     }
 }
 
+/// Noon UTC on 2026-11-07, or midnight after it, depending on the test's clock.
+fn noon() -> Timestamp {
+    Timestamp::from_system_time(SystemTime::UNIX_EPOCH + Duration::from_secs(20_399 * 86_400 + 12 * 3600))
+}
+
+fn next_day() -> Timestamp {
+    noon().next_utc_midnight()
+}
+
 #[tokio::test]
-async fn the_budget_counts_completed_and_failed_calls_and_stops_further_generation() {
-    let model = Budgeted::new(Fixed, Usd::new(0.03).unwrap());
+async fn the_daily_budget_counts_completed_and_failed_calls_and_earlier_runs() {
+    // Earlier runs today spent a cent.
+    let model = Budgeted::with_clock(Fixed, Usd::new(0.04).unwrap(), Usd::new(0.01).unwrap(), noon);
     let ok = Prompt {
         instructions: "ok".into(),
         blocks: vec![],
@@ -134,10 +147,48 @@ async fn the_budget_counts_completed_and_failed_calls_and_stops_further_generati
         model.generate(&fail).await,
         Err(GenerateError::Unusable { .. })
     ));
-    // The call that crossed the limit completed; the next one is refused.
+    // The call that crossed the limit completed; the next one is refused until midnight.
+    match model.generate(&ok).await {
+        Err(GenerateError::BudgetSpent { resumes_at, .. }) => assert_eq!(resumes_at, next_day()),
+        other => panic!("expected a spent budget, got {other:?}"),
+    }
+    assert_eq!(model.spent_today().to_string(), "$0.0420");
+}
+
+#[tokio::test]
+async fn the_budget_starts_over_at_midnight_utc() {
+    let model = Budgeted::with_clock(Fixed, Usd::new(0.01).unwrap(), Usd::new(0.5).unwrap(), noon);
+    let ok = Prompt {
+        instructions: "ok".into(),
+        blocks: vec![],
+    };
     assert!(matches!(
         model.generate(&ok).await,
         Err(GenerateError::BudgetSpent { .. })
     ));
-    assert_eq!(model.spent().to_string(), "$0.0320");
+    let tomorrow = Budgeted::with_clock(Fixed, Usd::new(0.01).unwrap(), Usd::ZERO, next_day);
+    tomorrow.generate(&ok).await.unwrap();
+}
+
+#[test]
+fn todays_spend_comes_from_the_recorded_calls_of_that_day() {
+    let call = |timestamp: Timestamp, cost: f64| Entry {
+        seq: Seq::new(1),
+        timestamp,
+        event: Event::Generation {
+            through: Seq::ZERO,
+            generation: Generation {
+                model: "m".into(),
+                latency: Duration::ZERO,
+                finish_reason: FinishReason::Stop,
+                usage: Usage {
+                    cost: Usd::new(cost).unwrap(),
+                    ..Usage::default()
+                },
+            },
+        },
+    };
+    let yesterday = Timestamp::from_system_time(noon().as_system_time() - Duration::from_secs(86_400));
+    let entries = [call(yesterday, 5.0), call(noon(), 0.25), call(noon(), 0.5)];
+    assert_eq!(spent_on_day(&entries, noon()).to_string(), "$0.7500");
 }

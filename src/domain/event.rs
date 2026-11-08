@@ -37,6 +37,22 @@ impl Timestamp {
         Timestamp(SystemTime::now())
     }
 
+    pub fn from_system_time(time: SystemTime) -> Self {
+        Timestamp(time)
+    }
+
+    /// The UTC day this falls on, counted from the Unix epoch.
+    pub fn utc_day(self) -> u64 {
+        self.0
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() / 86_400)
+    }
+
+    /// Midnight UTC at the start of the next day.
+    pub fn next_utc_midnight(self) -> Self {
+        Timestamp(SystemTime::UNIX_EPOCH + Duration::from_secs((self.utc_day() + 1) * 86_400))
+    }
+
     pub fn as_system_time(self) -> SystemTime {
         self.0
     }
@@ -53,6 +69,26 @@ impl FromStr for Timestamp {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         humantime::parse_rfc3339(s).map(Timestamp)
+    }
+}
+
+/// A credential. Never printed, and never handed to evaluated code.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Secret(secret.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(…)")
     }
 }
 
@@ -191,6 +227,10 @@ pub enum Event {
     Generation {
         through: Seq,
         generation: Generation,
+    },
+    /// The runtime telling the human something, such as a paused budget.
+    Notice {
+        text: String,
     },
 }
 
