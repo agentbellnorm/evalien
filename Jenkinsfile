@@ -22,6 +22,9 @@ pipeline {
               securityContext:
                 runAsUser: 1000
               containers:
+              # The agent's Java must match the controller's (Java 21).
+              - name: jnlp
+                image: jenkins/inbound-agent:latest-jdk21
               - name: yq
                 image: mikefarah/yq:4.44.1
                 command:
