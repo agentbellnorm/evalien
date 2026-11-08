@@ -8,9 +8,11 @@ metadata:
 data:
   MODEL: anthropic/claude-sonnet-5-5
   # Per UTC day. When it's spent the agent pauses until midnight and says so.
-  MODEL_BUDGET_USD: "2"
+  MODEL_BUDGET_USD: "3"
   # The in-cluster Synapse service; this traffic never leaves the cluster.
   MATRIX_HOMESERVER: http://matrix-synapse.skum-matrix.svc.cluster.local:8008
-  # The room the agent's account has been invited to, and the one user it listens to.
-  MATRIX_ROOM_ID: "!REPLACE_ME:matrix.skum.dev"
-  MATRIX_OWNER: "@REPLACE_ME:matrix.skum.dev"
+  # The room the agent's account has been invited to, exactly as the client
+  # shows it (room version 12 IDs have no ":server" part), and the one user
+  # the agent listens to.
+  MATRIX_ROOM_ID: "!aYCSALsizJZOlVOtoAtq9EEGY_Tg8dKoISU2qPZ2nVg"
+  MATRIX_OWNER: "@morgan:matrix.skum.dev"

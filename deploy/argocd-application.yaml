@@ -1,0 +1,20 @@
+# The ArgoCD Application for deploy/k8s. Applied once by hand; it lives
+# outside deploy/k8s so ArgoCD doesn't manage itself.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: evalien
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/agentbellnorm/evalien.git
+    targetRevision: main
+    path: deploy/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: evalien
+  syncPolicy:
+    # Jenkins bumps the image tag on main; this rolls it out.
+    automated:
+      prune: true

@@ -110,24 +110,21 @@ Variables in `./.env` are read too; the process environment wins.
 
 The manifests in [`deploy/k8s/`](deploy/k8s/) run one pod with a Longhorn volume for `/data`, talking over the in-cluster Synapse. They hold no secrets.
 
-1. Give the agent a Matrix account, and get its access token:
+1. Give the agent its own Matrix account:
    ```
    kubectl -n skum-matrix exec -it deploy/matrix-synapse -- \
      register_new_matrix_user http://localhost:8008 -c /theconfig/homeserver.yaml -u evalien --no-admin
-   curl -s https://matrix.skum.dev/_matrix/client/v3/login -d \
-     '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"evalien"},"password":"…"}'
    ```
-2. From your own account, create an unencrypted room and invite the agent's account. Put the room ID (Room settings → Advanced) and your user ID in `deploy/k8s/03-config.yaml`.
-3. Build and push the image (arm64), then create the namespace and the Secret:
+2. From your own account, create a room with encryption off (it can't be turned off later) and invite the agent's account. Put the room ID exactly as Room settings → Advanced shows it, and your own user ID, in `deploy/k8s/03-config.yaml`.
+3. Create the namespace and the `evalien-secrets` Secret. The script logs in as the agent to get its access token, and takes the Anthropic key from `.env` or asks for it:
    ```
-   podman build --platform linux/arm64 -t registry.bushnet.diy/evalien:0.1.0 .
-   podman push registry.bushnet.diy/evalien:0.1.0
-   kubectl apply -f deploy/k8s/01-namespace.yaml
-   kubectl -n evalien create secret generic evalien-secrets \
-     --from-literal=ANTHROPIC_API_KEY=… --from-literal=MATRIX_ACCESS_TOKEN=…
-   kubectl apply -f deploy/k8s/
+   ./scripts/create-secrets.sh
    ```
-4. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
+4. Build and deploy through the cluster's pipeline: a Jenkins multibranch job on this repo builds the image (`Jenkinsfile`), pushes it to the cluster registry, and bumps the tag in `deploy/k8s/04-deployment.yaml`. ArgoCD deploys `deploy/k8s` from `main`; apply its Application once:
+   ```
+   kubectl apply -f deploy/argocd-application.yaml
+   ```
+5. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
 
 The pod runs as non-root with a read-only root filesystem, no capabilities, no service account token, and a NetworkPolicy that allows only DNS, Synapse, and public HTTP(S).
 
