@@ -11,6 +11,9 @@ pipeline {
     }
     agent {
         kubernetes {
+            // Not the cloud's default template: its agent image is a stale
+            // Java 17 build, and it would override the one pinned below.
+            inheritFrom ''
             agentContainer 'jnlp'
             yaml """
             apiVersion: v1
