@@ -1,6 +1,6 @@
-//! Connections, from a TOML file named by CONNECTIONS_FILE. Secrets are
-//! named, not written: each comes from an environment variable, which in the
-//! cluster is the Kubernetes Secret.
+//! The gateway's configuration. Connections come from a TOML file named by
+//! CONNECTIONS_FILE; secrets are named there, not written, and each comes from
+//! an environment variable, which in the cluster is the Kubernetes Secret.
 //!
 //! ```toml
 //! [connections.example]
@@ -8,26 +8,67 @@
 //! origins = ["https://api.example.com"]
 //! header = { name = "Authorization", value = "Bearer {key}" }
 //! key = { secret = "EXAMPLE_API_KEY" }
+//!
+//! [connections.google-calendar]
+//! kind = "oauth"
+//! provider = "google"
+//! origins = ["https://www.googleapis.com"]
+//! scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+//! client_id = { secret = "GOOGLE_CLIENT_ID" }
+//! client_secret = { secret = "GOOGLE_CLIENT_SECRET" }
 //! ```
+//!
+//! OAuth connections also need VAULT_KEY (where their tokens are kept),
+//! CALLBACK_ADDR (where the callback listens) and OAUTH_REDIRECT_URL (how the
+//! browser reaches it).
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
+use reqwest::Url;
 use serde::Deserialize;
 
 use crate::domain::{Origin, Secret};
 
+use super::{
+    oauth::OAuthClient,
+    vault::{VaultError, VaultKey},
+};
+
+/// Everything the gateway needs, checked.
+#[derive(Default)]
+pub struct GatewayConfig {
+    pub connections: Vec<ConnectionConfig>,
+    pub vault: Option<VaultConfig>,
+    pub callback: Option<CallbackConfig>,
+}
+
+pub struct VaultConfig {
+    pub path: PathBuf,
+    pub key: VaultKey,
+}
+
+/// Where the OAuth callback listens, and the URL the provider sends the browser to.
+pub struct CallbackConfig {
+    pub listen: SocketAddr,
+    pub redirect: Url,
+}
+
 /// One connection, checked and with its secrets filled in.
-#[derive(Debug, PartialEq)]
 pub struct ConnectionConfig {
     pub name: String,
     pub origins: Vec<Origin>,
     pub kind: KindConfig,
 }
 
-#[derive(Debug, PartialEq)]
 pub enum KindConfig {
     /// A fixed header on every request.
     ApiKey { header: String, value: Secret },
+    /// Bearer tokens from an OAuth login, refreshed as needed.
+    OAuth { client: Box<OAuthClient> },
 }
 
 #[derive(Deserialize)]
@@ -44,6 +85,14 @@ enum Spec {
         origins: Vec<String>,
         header: HeaderSpec,
         key: SecretRef,
+    },
+    #[serde(rename = "oauth")]
+    OAuth {
+        provider: String,
+        origins: Vec<String>,
+        scopes: Vec<String>,
+        client_id: SecretRef,
+        client_secret: SecretRef,
     },
 }
 
@@ -72,13 +121,50 @@ const RESERVED_HEADERS: [&str; 6] = [
     "te",
 ];
 
-/// The connections in the file named by CONNECTIONS_FILE, or none.
-pub fn read(env: &HashMap<String, String>) -> Result<Vec<ConnectionConfig>, String> {
-    let Some(path) = env.get("CONNECTIONS_FILE").filter(|path| !path.is_empty()) else {
-        return Ok(Vec::new());
+/// The gateway's configuration from the environment. `state_dir` is where the
+/// vault goes unless VAULT_PATH says otherwise.
+pub fn read(env: &HashMap<String, String>, state_dir: &Path) -> Result<GatewayConfig, String> {
+    let set = |name: &str| {
+        env.get(name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
     };
-    let text = std::fs::read_to_string(path).map_err(|e| format!("CONNECTIONS_FILE {path}: {e}"))?;
-    parse(&text, env).map_err(|e| format!("{path}: {e}"))
+    let connections = match set("CONNECTIONS_FILE") {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("CONNECTIONS_FILE {path}: {e}"))?;
+            parse(&text, env).map_err(|e| format!("{path}: {e}"))?
+        }
+        None => Vec::new(),
+    };
+    let vault = match set("VAULT_KEY") {
+        Some(key) => Some(VaultConfig {
+            path: set("VAULT_PATH").map_or_else(|| state_dir.join("vault.db"), PathBuf::from),
+            key: VaultKey::from_base64(key).map_err(|e: VaultError| e.to_string())?,
+        }),
+        None => None,
+    };
+    let callback = match (set("CALLBACK_ADDR"), set("OAUTH_REDIRECT_URL")) {
+        (Some(listen), Some(redirect)) => Some(CallbackConfig {
+            listen: listen.parse().map_err(|e| format!("CALLBACK_ADDR: {e}"))?,
+            redirect: Url::parse(redirect).map_err(|e| format!("OAUTH_REDIRECT_URL: {e}"))?,
+        }),
+        (None, None) => None,
+        _ => return Err("set both CALLBACK_ADDR and OAUTH_REDIRECT_URL, or neither".into()),
+    };
+    let needs_login = connections
+        .iter()
+        .any(|connection| matches!(connection.kind, KindConfig::OAuth { .. }));
+    if needs_login && vault.is_none() {
+        return Err("OAuth connections keep tokens in the vault: set VAULT_KEY (openssl rand -base64 32)".into());
+    }
+    if needs_login && callback.is_none() {
+        return Err("OAuth connections need a callback: set CALLBACK_ADDR and OAUTH_REDIRECT_URL".into());
+    }
+    Ok(GatewayConfig {
+        connections,
+        vault,
+        callback,
+    })
 }
 
 pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<ConnectionConfig>, String> {
@@ -96,7 +182,58 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
             ));
         }
         let fail = |message: String| format!("connection {name}: {message}");
-        let Spec::ApiKey { origins, header, key } = spec;
+        let secret = |reference: &SecretRef| {
+            env.get(&reference.secret)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| fail(format!("set {}", reference.secret)))
+        };
+        let (origins, kind) = match spec {
+            Spec::ApiKey { origins, header, key } => {
+                let header_name = header.name.trim().to_owned();
+                let valid =
+                    !header_name.is_empty() && header_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+                if !valid || RESERVED_HEADERS.contains(&header_name.to_ascii_lowercase().as_str()) {
+                    return Err(fail(format!("{header_name:?} can't carry a key")));
+                }
+                if header.value.matches("{key}").count() != 1 {
+                    return Err(fail("the header value must contain {key} once".into()));
+                }
+                let value = Secret::new(header.value.replace("{key}", &secret(&key)?));
+                (
+                    origins,
+                    KindConfig::ApiKey {
+                        header: header_name,
+                        value,
+                    },
+                )
+            }
+            Spec::OAuth {
+                provider,
+                origins,
+                scopes,
+                client_id,
+                client_secret,
+            } => {
+                if scopes.is_empty() {
+                    return Err(fail("list the scopes to ask for".into()));
+                }
+                let client = OAuthClient::for_provider(
+                    &provider,
+                    secret(&client_id)?,
+                    Secret::new(secret(&client_secret)?),
+                    scopes,
+                )
+                .ok_or_else(|| fail(format!("unknown OAuth provider {provider:?}; known: google")))?;
+                (
+                    origins,
+                    KindConfig::OAuth {
+                        client: Box::new(client),
+                    },
+                )
+            }
+        };
         let origins = origins
             .iter()
             .map(|origin| Origin::parse(origin))
@@ -110,28 +247,7 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
                 return Err(fail(format!("{origin} already belongs to connection {other}")));
             }
         }
-        let header_name = header.name.trim();
-        let valid = !header_name.is_empty() && header_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-        if !valid || RESERVED_HEADERS.contains(&header_name.to_ascii_lowercase().as_str()) {
-            return Err(fail(format!("{header_name:?} can't carry a key")));
-        }
-        if header.value.matches("{key}").count() != 1 {
-            return Err(fail("the header value must contain {key} once".into()));
-        }
-        let secret = env
-            .get(&key.secret)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| fail(format!("set {}", key.secret)))?;
-        let value = Secret::new(header.value.replace("{key}", secret));
-        connections.push(ConnectionConfig {
-            name,
-            origins,
-            kind: KindConfig::ApiKey {
-                header: header_name.to_owned(),
-                value,
-            },
-        });
+        connections.push(ConnectionConfig { name, origins, kind });
     }
     Ok(connections)
 }
@@ -141,7 +257,14 @@ mod tests {
     use super::*;
 
     fn env() -> HashMap<String, String> {
-        [("EXAMPLE_KEY".to_owned(), "k-123".to_owned())].into_iter().collect()
+        [
+            ("EXAMPLE_KEY", "k-123"),
+            ("CLIENT_ID", "id-1"),
+            ("CLIENT_SECRET", "cs-1"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
     }
 
     #[test]
@@ -156,13 +279,52 @@ mod tests {
         let connections = parse(text, &env()).unwrap();
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].origins[1].as_str(), "https://upload.example.com:8443");
-        let KindConfig::ApiKey { header, value } = &connections[0].kind;
+        let KindConfig::ApiKey { header, value } = &connections[0].kind else {
+            panic!("expected an API key")
+        };
         assert_eq!((header.as_str(), value.expose()), ("Authorization", "Bearer k-123"));
-        assert_eq!(
-            format!("{connections:?}").matches("k-123").count(),
-            0,
-            "secrets never print"
+    }
+
+    #[test]
+    fn an_oauth_connection_names_a_known_provider_and_its_client() {
+        let text = r#"
+            [connections.google-calendar]
+            kind = "oauth"
+            provider = "google"
+            origins = ["https://www.googleapis.com"]
+            scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+            client_id = { secret = "CLIENT_ID" }
+            client_secret = { secret = "CLIENT_SECRET" }
+        "#;
+        let connections = parse(text, &env()).unwrap();
+        assert!(matches!(connections[0].kind, KindConfig::OAuth { .. }));
+        let unknown = parse(&text.replace("\"google\"", "\"myspace\""), &env()).err().unwrap();
+        assert!(unknown.contains("unknown OAuth provider"), "{unknown}");
+    }
+
+    #[test]
+    fn oauth_needs_the_vault_and_a_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("connections.toml");
+        std::fs::write(&file, "[connections.g]\nkind = \"oauth\"\nprovider = \"google\"\norigins = [\"https://www.googleapis.com\"]\nscopes = [\"s\"]\nclient_id = { secret = \"CLIENT_ID\" }\nclient_secret = { secret = \"CLIENT_SECRET\" }\n").unwrap();
+        let mut env = env();
+        env.insert("CONNECTIONS_FILE".into(), file.display().to_string());
+        let error = read(&env, dir.path()).err().unwrap();
+        assert!(error.contains("VAULT_KEY"), "{error}");
+        env.insert(
+            "VAULT_KEY".into(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
         );
+        let error = read(&env, dir.path()).err().unwrap();
+        assert!(error.contains("CALLBACK_ADDR"), "{error}");
+        env.insert("CALLBACK_ADDR".into(), "0.0.0.0:8080".into());
+        env.insert(
+            "OAUTH_REDIRECT_URL".into(),
+            "https://evalien.bushnet.diy/oauth/callback".into(),
+        );
+        let config = read(&env, dir.path()).unwrap();
+        assert_eq!(config.vault.unwrap().path, dir.path().join("vault.db"));
+        assert_eq!(config.callback.unwrap().redirect.path(), "/oauth/callback");
     }
 
     #[test]
@@ -213,7 +375,7 @@ mod tests {
                 "unknown variant",
             ),
         ] {
-            let error = parse(&text, &env()).unwrap_err();
+            let error = parse(&text, &env()).err().unwrap();
             assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
         }
     }

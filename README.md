@@ -16,7 +16,7 @@ The agent's JavaScript runs in a sandbox: QuickJS compiled to a WebAssembly comp
 - **Evaluation**: the sandbox. It evaluates code as an async function body (`return` to inspect, `globalThis` to keep state) and reports output, timers and results as they happen.
 - **Capabilities**: what the sandbox can reach. `db` is SQL on the agent's database, where it can keep its own tables and read its history but never change the trajectory. `fetch` reaches the public internet only, with addresses checked at connection time.
 - **Harness**: wires the components together. It decides which events wake the model and paces calls when no human is talking. When the day's budget is spent, it records a notice and pauses until midnight UTC.
-- **Connectors**: a credential gateway. Requests the agent sends to a connected service's origins get its credentials attached on the way out; the agent never sees them. API keys today, with OAuth and BankID logins next ([design](docs/connectors.md)).
+- **Connectors**: a credential gateway. Requests the agent sends to a connected service's origins get its credentials attached on the way out; the agent never sees them. API keys and OAuth (the agent calls `connections.connect`, the human gets a sign-in link, tokens refresh by themselves), with BankID next ([design](docs/connectors.md)).
 - **Chat**: how the human reaches the agent remotely. Their messages become `stdin`; the code the agent runs (as a highlighted block), its `console.log` output and the runtime's notices go back. Matrix is the first implementation of the `Chat` port; without one, the terminal is the channel.
 
 ## How it fits together
@@ -106,6 +106,9 @@ The image is distroless and runs as a non-root user.
 | `MATRIX_OWNER` | | The only user whose messages reach the agent, e.g. `@you:example.org` |
 | `METRICS_ADDR` | | Serve Prometheus metrics at `http://<addr>/metrics`, e.g. `0.0.0.0:9464` |
 | `CONNECTIONS_FILE` | | A TOML file of external services whose requests get credentials; see [docs/connectors.md](docs/connectors.md) |
+| `VAULT_KEY` | | 32 bytes, base64: encrypts the tokens OAuth logins earn. Required with OAuth connections |
+| `VAULT_PATH` | next to the database | Where the vault lives |
+| `CALLBACK_ADDR`, `OAUTH_REDIRECT_URL` | | Where the OAuth callback listens, and the URL the browser is sent to. Required with OAuth connections |
 
 Variables in `./.env` are read too; the process environment wins.
 
@@ -123,11 +126,18 @@ The manifests in [`deploy/k8s/`](deploy/k8s/) run one pod with a Longhorn volume
    ```
    ./scripts/create-secrets.sh
    ```
-4. Build and deploy through the cluster's pipeline: a Jenkins multibranch job on this repo builds the image (`Jenkinsfile`), pushes it to the cluster registry, and bumps the tag in `deploy/k8s/04-deployment.yaml`. ArgoCD deploys `deploy/k8s` from `main`; apply its Application once:
+4. Set the secrets the connections in `03-config.yaml` name, each prompted for so it's never echoed, and generate the vault key once:
+   ```
+   ./scripts/set-secret.sh GOOGLE_CLIENT_ID
+   ./scripts/set-secret.sh GOOGLE_CLIENT_SECRET
+   ./scripts/set-secret.sh VAULT_KEY --generate
+   ```
+   OAuth sign-ins land on `https://evalien.bushnet.diy/oauth/callback`, so the browser needs to be on the tailnet while signing in. Register that URL as the OAuth client's redirect URI.
+5. Build and deploy through the cluster's pipeline: a Jenkins multibranch job on this repo builds the image (`Jenkinsfile`), pushes it to the cluster registry, and bumps the tag in `deploy/k8s/04-deployment.yaml`. ArgoCD deploys `deploy/k8s` from `main`; apply its Application once:
    ```
    kubectl apply -f deploy/argocd-application.yaml
    ```
-5. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
+6. Follow along with `kubectl -n evalien logs -f deploy/evalien`. The log is the trajectory as it grows.
 
 The pod runs as non-root with a read-only root filesystem, no capabilities, no service account token, and a NetworkPolicy that allows only DNS, Synapse, and public HTTP(S).
 

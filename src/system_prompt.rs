@@ -37,7 +37,7 @@ pub fn build(facts: &Facts<'_>) -> String {
         String::new()
     } else {
         format!(
-            "\n- connections.list() returns the services connected for you ({}), with their origins and status. Requests you fetch to those origins are signed for you; you never see the credentials. A response with an x-evalien-connection header means that connection needs attention.",
+            "\n- connections.list() returns the services set up for you ({}), with their origins and status. Requests you fetch to those origins are signed for you; you never see the credentials. A response with an x-evalien-connection header means that connection isn't signed in: await connections.connect(name) sends the human a sign-in link and resolves once they've signed in (or rejects after a timeout, 3 minutes by default).",
             facts.connections.join(", ")
         )
     };

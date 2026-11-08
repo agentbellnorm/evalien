@@ -1,6 +1,6 @@
-# A second layer behind the sandbox's own checks: only Prometheus reaches the
-# pod, for metrics, and the pod reaches only DNS, Synapse, and the public
-# internet over HTTP(S).
+# A second layer behind the sandbox's own checks: only Prometheus (metrics) and
+# Traefik (the OAuth callback) reach the pod, and the pod reaches only DNS,
+# Synapse, and the public internet over HTTP(S).
 # Private ranges (the LAN, the cluster, Tailscale, link-local metadata) are excluded.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -22,6 +22,15 @@ spec:
               app: prometheus
       ports:
         - { protocol: TCP, port: 9464 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - { protocol: TCP, port: 8080 }
   egress:
     - to:
         - namespaceSelector:

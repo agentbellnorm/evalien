@@ -140,6 +140,6 @@ key = { secret = "EXAMPLE_API_KEY" }
 ## Build order
 
 1. **Vault and API keys.** *Done.* The encrypted vault, the gateway port in `fetch`, origin matching, response stripping, `connections.list()`, metrics.
-2. **OAuth with Google Calendar.** The callback endpoint and its Tailscale ingress, PKCE, refresh, `connect` for OAuth.
+2. **OAuth with Google Calendar.** *Done.* The callback endpoint and its Tailscale ingress, PKCE, refresh, `connect` for OAuth.
 3. **BankID.** The shared flow and keepalive, then Kivra and the bank as the first providers, once their flows are reverse-engineered.
 4. **Later.** Proton, BankID QR, signing.

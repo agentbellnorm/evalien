@@ -2,7 +2,7 @@
 //! attach credentials to the agent's requests by origin, so the agent calls
 //! services directly and never holds a secret.
 
-use std::fmt;
+use std::{fmt, future::Future, pin::Pin, time::Duration};
 
 use super::event::Secret;
 
@@ -42,27 +42,35 @@ impl fmt::Display for Origin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionKind {
     ApiKey,
+    OAuth,
 }
 
 impl ConnectionKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ConnectionKind::ApiKey => "api_key",
+            ConnectionKind::OAuth => "oauth",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
+    /// Never signed in, or signed out.
+    NotConnected,
+    /// Waiting for the human to finish signing in.
+    LoggingIn,
     /// Requests to its origins carry credentials.
     Connected,
-    /// The service rejected the credentials, or the session ended.
+    /// The service revoked the credentials, or the session ended.
     Expired,
 }
 
 impl ConnectionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            ConnectionStatus::NotConnected => "not_connected",
+            ConnectionStatus::LoggingIn => "logging_in",
             ConnectionStatus::Connected => "connected",
             ConnectionStatus::Expired => "expired",
         }
@@ -99,6 +107,12 @@ pub enum Attachment {
         connection: String,
         headers: Vec<(String, Secret)>,
     },
+    /// A connection serves this origin but isn't signed in: the request goes
+    /// out as written, and the agent is told.
+    NotConnected {
+        connection: String,
+        status: ConnectionStatus,
+    },
 }
 
 /// How a request through a connection ended.
@@ -109,6 +123,9 @@ pub enum RequestOutcome {
     Failed,
 }
 
+/// A login in progress. Resolves to the connection's status once it's done.
+pub type Connecting<'a> = Pin<Box<dyn Future<Output = Result<ConnectionStatus, String>> + Send + 'a>>;
+
 pub trait Gateway: Send + Sync {
     /// What to add to a request for `origin`.
     fn attach(&self, origin: &Origin) -> Attachment;
@@ -116,4 +133,7 @@ pub trait Gateway: Send + Sync {
     /// connection's status afterwards.
     fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;
     fn connections(&self) -> Vec<ConnectionInfo>;
+    /// Sign in to `connection` if it isn't already, waiting at most `timeout`
+    /// for the human. Concurrent calls wait on the same login.
+    fn connect(&self, connection: &str, timeout: Duration) -> Connecting<'_>;
 }

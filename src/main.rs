@@ -6,7 +6,7 @@ use anyhow::Context;
 use evalien::{
     chat::{self, Matrix},
     config::{self, Human},
-    connectors::Connectors,
+    connectors::{self, Connectors},
     db::{self, Access, SqliteStore},
     domain::{Gateway, TRAJECTORY_TABLE, Timestamp, Trajectory},
     evaluation::{
@@ -51,9 +51,22 @@ async fn run() -> anyhow::Result<u8> {
 
     // The agent's own handle on the database, with the trajectory read-only.
     // The credential gateway, when there are connections to sign requests for.
-    let connection_names: Vec<String> = config.connections.iter().map(|c| c.name.clone()).collect();
-    let gateway: Option<Arc<dyn Gateway>> =
-        (!config.connections.is_empty()).then(|| Arc::new(Connectors::new(config.connections)) as Arc<dyn Gateway>);
+    let connection_names: Vec<String> = config.gateway.connections.iter().map(|c| c.name.clone()).collect();
+    let callback = config.gateway.callback.as_ref().map(|callback| callback.listen);
+    let gateway: Option<Arc<dyn Gateway>> = if connection_names.is_empty() {
+        None
+    } else {
+        let connectors = Connectors::new(config.gateway, log.clone(), debug).map_err(anyhow::Error::msg)?;
+        // Restore signed-in sessions and refresh their tokens before the agent starts.
+        connectors.start().await;
+        if let Some(addr) = callback {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("serving the OAuth callback on {addr}"))?;
+            tokio::spawn(connectors::serve_callback(listener, connectors.clone(), debug));
+        }
+        Some(connectors)
+    };
 
     let mut capabilities = Capabilities::none()
         .with_sql(Sql::open(&config.db_path, TRAJECTORY_TABLE)?)

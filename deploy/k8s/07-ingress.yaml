@@ -1,0 +1,27 @@
+# Where the browser lands after an OAuth sign-in. *.bushnet.diy resolves to
+# the tailnet only, and only the callback path is routed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: evalien
+  namespace: evalien
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: evalien.bushnet.diy
+      http:
+        paths:
+          - path: /oauth/callback
+            pathType: Exact
+            backend:
+              service:
+                name: evalien
+                port:
+                  name: callback
+  tls:
+    - hosts:
+        - evalien.bushnet.diy
+      secretName: evalien-tls

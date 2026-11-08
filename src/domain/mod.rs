@@ -9,7 +9,8 @@ mod trajectory;
 
 pub use event::{Entry, Event, FinishReason, Generation, Outcome, Secret, Seq, Timestamp, Usage, Usd};
 pub use gateway::{
-    Attachment, ConnectionInfo, ConnectionKind, ConnectionStatus, Gateway, Origin, RequestCounts, RequestOutcome,
+    Attachment, Connecting, ConnectionInfo, ConnectionKind, ConnectionStatus, Gateway, Origin, RequestCounts,
+    RequestOutcome,
 };
 pub use ports::{Evaluator, EvaluatorStopped, GenerateError, Model, Prompt, Reply};
 pub use trajectory::{RecordStore, StoreError, StoredRecord, Trajectory, TrajectoryError};

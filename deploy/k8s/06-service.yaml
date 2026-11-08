@@ -1,0 +1,13 @@
+# The OAuth callback, for the ingress. Metrics are scraped from the pod directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: evalien
+  namespace: evalien
+spec:
+  selector:
+    app: evalien
+  ports:
+    - name: callback
+      port: 8080
+      targetPort: callback

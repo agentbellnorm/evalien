@@ -5,7 +5,7 @@
 mod fetch;
 mod sql;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -28,7 +28,15 @@ pub struct Capabilities {
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 enum ConnectionsRequest {
     List,
+    /// Sign in, waiting up to `timeout` milliseconds for the human.
+    Connect {
+        name: String,
+        timeout: u64,
+    },
 }
+
+/// Bounds on how long `connect` waits.
+const CONNECT_TIMEOUT: (u64, u64) = (1_000, 15 * 60_000);
 
 impl Capabilities {
     pub fn none() -> Self {
@@ -75,6 +83,11 @@ impl Capabilities {
             "fetch" if let Some(fetch) = &self.fetch => fetch.request(parse(args)?).await?,
             "connections" if let Some(gateway) = &self.connections => match parse(args)? {
                 ConnectionsRequest::List => list(gateway.as_ref()),
+                ConnectionsRequest::Connect { name, timeout } => {
+                    let timeout = Duration::from_millis(timeout.clamp(CONNECT_TIMEOUT.0, CONNECT_TIMEOUT.1));
+                    let status = gateway.connect(&name, timeout).await?;
+                    json!({ "name": name, "status": status.as_str() })
+                }
             },
             _ => return Err(format!("no capability named {name:?}")),
         };

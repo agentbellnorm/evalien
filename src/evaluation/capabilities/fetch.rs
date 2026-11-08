@@ -89,7 +89,12 @@ impl Fetch {
                 builder = builder.body(body.clone());
             }
             let sent = builder.send().await;
-            let hint = self.observe(&attachment, sent.as_ref().ok().map(|response| response.status()));
+            let hint = match &attachment {
+                Attachment::NotConnected { connection, status } => {
+                    Some(format!("{connection}; status={}", status.as_str()))
+                }
+                _ => self.observe(&attachment, sent.as_ref().ok().map(|response| response.status())),
+            };
             let response = sent.map_err(|e| describe(&e))?;
             let location = response.headers().get(LOCATION).and_then(|value| value.to_str().ok());
             match next_hop(&hop, response.status(), location) {

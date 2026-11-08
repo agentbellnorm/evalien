@@ -44,6 +44,8 @@ spec:
           ports:
             - name: metrics
               containerPort: 9464
+            - name: callback
+              containerPort: 8080
           env:
             - name: AGENT_DB_PATH
               value: /data/agent.db

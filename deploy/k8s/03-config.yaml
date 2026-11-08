@@ -12,6 +12,9 @@ data:
   # Prometheus scrapes this; see the pod annotations and the NetworkPolicy.
   METRICS_ADDR: "0.0.0.0:9464"
   CONNECTIONS_FILE: /config/connections.toml
+  # OAuth: where the callback listens, and how the browser reaches it (tailnet only).
+  CALLBACK_ADDR: "0.0.0.0:8080"
+  OAUTH_REDIRECT_URL: https://evalien.bushnet.diy/oauth/callback
   # The in-cluster Synapse service; this traffic never leaves the cluster.
   MATRIX_HOMESERVER: http://matrix-synapse.skum-matrix.svc.cluster.local:8008
   # The room the agent's account has been invited to, exactly as the client
@@ -29,6 +32,14 @@ metadata:
   namespace: evalien
 data:
   connections.toml: |
+    [connections.google-calendar]
+    kind = "oauth"
+    provider = "google"
+    origins = ["https://www.googleapis.com"]
+    scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+    client_id = { secret = "GOOGLE_CLIENT_ID" }
+    client_secret = { secret = "GOOGLE_CLIENT_SECRET" }
+
     # [connections.example]
     # kind = "api_key"
     # origins = ["https://api.example.com"]
