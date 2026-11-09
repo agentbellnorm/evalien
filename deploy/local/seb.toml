@@ -1,0 +1,6 @@
+# For trying the SEB connection from a terminal:
+#   cargo run --bin connect -- deploy/local/seb.toml seb https://apps.seb.se/cps/api/notifications/private
+[connections.seb]
+kind = "bankid"
+provider = "seb"
+origins = ["https://apps.seb.se"]

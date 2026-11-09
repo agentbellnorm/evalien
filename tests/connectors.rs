@@ -140,9 +140,9 @@ async fn the_agent_sees_its_connections_but_never_their_credentials() {
     assert_eq!(
         connections,
         serde_json::json!([
-            { "name": "notes", "kind": "api_key", "status": "connected", "origins": ["https://notes.example"] },
+            { "name": "notes", "kind": "api_key", "status": "connected", "origins": ["https://notes.example"], "skill": false },
             { "name": "weather", "kind": "api_key", "status": "connected",
-              "origins": ["https://api.weather.example", "https://maps.weather.example:8443"] },
+              "origins": ["https://api.weather.example", "https://maps.weather.example:8443"], "skill": false },
         ])
     );
 }

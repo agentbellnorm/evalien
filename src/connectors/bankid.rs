@@ -99,6 +99,13 @@ impl BankIdProvider {
         }
     }
 
+    /// How the agent uses the service, compiled in with the provider.
+    pub fn skill(&self) -> Option<&'static str> {
+        match self {
+            BankIdProvider::Seb(_) => Some(include_str!("skills/seb.md")),
+        }
+    }
+
     /// Whether a response says the session has ended.
     pub fn signed_out(&self, response: &ResponseHead) -> bool {
         match self {

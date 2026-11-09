@@ -396,6 +396,14 @@ impl Connectors {
 }
 
 impl Connection {
+    /// How to use the service, if its provider says.
+    fn skill(&self) -> Option<&'static str> {
+        match &self.credentials {
+            Credentials::BankId(bankid) => bankid.skill(),
+            Credentials::ApiKey { .. } | Credentials::OAuth(_) => None,
+        }
+    }
+
     fn kind(&self) -> ConnectionKind {
         match self.credentials {
             Credentials::ApiKey { .. } => ConnectionKind::ApiKey,
@@ -510,8 +518,13 @@ impl Gateway for Connectors {
                 status: connection.status(),
                 origins: connection.origins.clone(),
                 requests: *lock(&connection.requests),
+                skill: connection.skill().is_some(),
             })
             .collect()
+    }
+
+    fn skill(&self, connection: &str) -> Option<String> {
+        self.named(connection)?.skill().map(str::to_owned)
     }
 
     fn connect(&self, name: &str, timeout: Duration) -> Connecting<'_> {

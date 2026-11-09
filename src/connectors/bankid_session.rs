@@ -54,6 +54,10 @@ impl BankId {
         })
     }
 
+    pub(super) fn skill(&self) -> Option<&'static str> {
+        self.provider.skill()
+    }
+
     pub(super) fn signed_out(&self, response: &ResponseHead) -> bool {
         self.provider.signed_out(response)
     }

@@ -87,6 +87,7 @@
       case "connections":
         globalThis.connections = Object.freeze({
           list: () => hostCall("connections", { op: "list" }),
+          skill: (name) => hostCall("connections", { op: "skill", name: String(name) }),
           connect: (name, { timeout = 180_000 } = {}) => hostCall("connections", { op: "connect", name: String(name), timeout }),
         });
         break;

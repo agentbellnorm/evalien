@@ -15,7 +15,10 @@ use base64::Engine;
 use evalien::connectors::config::{ConnectionConfig, GatewayConfig, KindConfig, VaultConfig};
 use evalien::connectors::{BankIdProvider, Connectors, Seb, Vault, VaultKey};
 use evalien::db::MemoryStore;
-use evalien::domain::{Attachment, ConnectionStatus, Event, Gateway, Origin, RequestOutcome, ResponseHead, Trajectory};
+use evalien::domain::{
+    Attachment, ConnectionStatus, Event, Gateway, Origin, Outcome, RequestOutcome, ResponseHead, Seq, Trajectory,
+};
+use evalien::evaluation::{Capabilities, Limits, Sandbox, SandboxHost};
 use reqwest::Url;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -400,4 +403,36 @@ async fn a_declined_or_unanswered_login_leaves_the_connection_as_it_was() {
     assert!(unanswered.unwrap_err().contains("in time"));
     assert!(bank.cancelled.load(Ordering::SeqCst));
     assert_eq!(status(&gateway), ConnectionStatus::NotConnected);
+}
+
+#[tokio::test]
+async fn sebs_skill_tells_the_agent_how_and_its_code_works() {
+    let (base, _) = fake_seb().await;
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log());
+    assert!(gateway.connections()[0].skill);
+    let skill = gateway.skill("seb").unwrap();
+    assert!(skill.contains("accounts-widget/api/accounts/all"), "{skill}");
+    assert!(gateway.skill("nope").is_none());
+
+    // The skill's snippet, run in the sandbox against HTML shaped like SEB's home page.
+    let snippet = skill.split("```js\n").nth(1).unwrap().split("```").next().unwrap();
+    let page = r#"<script>window.$$Shell.user = window.$$Shell.user || {"id":"12345678901234","name":"A PERSON","friendlyId":"19800101-0000","sebCustNo":"12345678901234"}
+window.$$Shell.principals = [];</script>"#;
+    let code = format!(
+        "const fetch = async () => ({{ text: async () => {} }});\n{snippet}\nreturn user.id + ' ' + user.sebCustNo;",
+        serde_json::to_string(page).unwrap()
+    );
+    let mut sandbox = Sandbox::new(SandboxHost::new().unwrap(), Capabilities::none(), Limits::default())
+        .await
+        .unwrap();
+    sandbox.evaluate(Seq::new(1), &code).await;
+    let result = sandbox.take_events().into_iter().find_map(|event| match event {
+        Event::Result { outcome, text, .. } => Some((outcome, text)),
+        _ => None,
+    });
+    assert_eq!(
+        result,
+        Some((Outcome::Return, r#""12345678901234 12345678901234""#.to_owned()))
+    );
 }

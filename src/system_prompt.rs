@@ -37,7 +37,7 @@ pub fn build(facts: &Facts<'_>) -> String {
         String::new()
     } else {
         format!(
-            "\n- connections.list() shows the services set up for you ({}) and whether they're signed in. Requests to their origins are signed for you; you never see the credentials. A response with an x-evalien-connection header means that connection needs signing in: await connections.connect(name) sends the human a link and resolves once they're done (it rejects after 3 minutes by default).",
+            "\n- connections.list() shows the services set up for you ({}) and whether they're signed in. When one has a skill, await connections.skill(name) explains how to use it: its endpoints and what they're for. Read it before using the service. Requests to their origins are signed for you; you never see the credentials. A response with an x-evalien-connection header means that connection needs signing in: await connections.connect(name) sends the human a link and resolves once they're done (it rejects after 3 minutes by default).",
             facts.connections.join(", ")
         )
     };

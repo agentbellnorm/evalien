@@ -97,6 +97,8 @@ pub struct ConnectionInfo {
     pub status: ConnectionStatus,
     pub origins: Vec<Origin>,
     pub requests: RequestCounts,
+    /// Whether there's a skill describing how to use the service.
+    pub skill: bool,
 }
 
 /// What the gateway adds to one request.
@@ -157,6 +159,8 @@ pub trait Gateway: Send + Sync {
     /// connection's status afterwards.
     fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;
     fn connections(&self) -> Vec<ConnectionInfo>;
+    /// How to use a connection's service: its endpoints and what they're for.
+    fn skill(&self, connection: &str) -> Option<String>;
     /// Sign in to `connection` if it isn't already, waiting at most `timeout`
     /// for the human. Concurrent calls wait on the same login.
     fn connect(&self, connection: &str, timeout: Duration) -> Connecting<'_>;

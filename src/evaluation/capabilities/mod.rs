@@ -33,6 +33,10 @@ enum ConnectionsRequest {
         name: String,
         timeout: u64,
     },
+    /// How to use a connection's service.
+    Skill {
+        name: String,
+    },
 }
 
 /// Bounds on how long `connect` waits.
@@ -88,6 +92,11 @@ impl Capabilities {
                     let status = gateway.connect(&name, timeout).await?;
                     json!({ "name": name, "status": status.as_str() })
                 }
+                ConnectionsRequest::Skill { name } => match gateway.skill(&name) {
+                    Some(skill) => Value::String(skill),
+                    None if gateway.connections().iter().any(|c| c.name == name) => Value::Null,
+                    None => return Err(format!("no connection named {name:?}")),
+                },
             },
             _ => return Err(format!("no capability named {name:?}")),
         };
@@ -106,6 +115,7 @@ fn list(gateway: &dyn Gateway) -> Value {
                 "kind": connection.kind.as_str(),
                 "status": connection.status.as_str(),
                 "origins": origins,
+                "skill": connection.skill,
             })
         })
         .collect();
