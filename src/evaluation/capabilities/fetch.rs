@@ -16,13 +16,13 @@ use std::{
 use reqwest::{
     Method, StatusCode, Url,
     dns::{Addrs, Name, Resolve, Resolving},
-    header::{HeaderMap, HeaderName, HeaderValue, LOCATION},
+    header::{HeaderMap, HeaderName, HeaderValue, LOCATION, SET_COOKIE},
     redirect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::domain::{Attachment, ConnectionStatus, Gateway, Origin, RequestOutcome};
+use crate::domain::{Attachment, ConnectionStatus, Gateway, RequestOutcome, ResponseHead};
 
 const MAX_REDIRECTS: usize = 5;
 const MAX_BODY: usize = 5 << 20;
@@ -93,7 +93,7 @@ impl Fetch {
                 Attachment::NotConnected { connection, status } => {
                     Some(format!("{connection}; status={}", status.as_str()))
                 }
-                _ => self.observe(&attachment, sent.as_ref().ok().map(|response| response.status())),
+                _ => self.observe(&attachment, &hop.url, sent.as_ref().ok()),
             };
             let response = sent.map_err(|e| describe(&e))?;
             let location = response.headers().get(LOCATION).and_then(|value| value.to_str().ok());
@@ -107,22 +107,37 @@ impl Fetch {
 
     fn attach(&self, url: &Url) -> Attachment {
         match &self.gateway {
-            Some(gateway) => gateway.attach(&Origin::of(url)),
+            Some(gateway) => gateway.attach(url),
             None => Attachment::Nothing,
         }
     }
 
     /// Report how a request through a connection went. Returns the hint for
     /// the agent when the connection now needs attention.
-    fn observe(&self, attachment: &Attachment, status: Option<StatusCode>) -> Option<String> {
+    fn observe(&self, attachment: &Attachment, url: &Url, response: Option<&reqwest::Response>) -> Option<String> {
         let (Some(gateway), Attachment::Credentials { connection, .. }) = (&self.gateway, attachment) else {
             return None;
         };
-        let outcome = status.map_or(RequestOutcome::Failed, |status| RequestOutcome::Status(status.as_u16()));
+        let outcome = match response {
+            Some(response) => RequestOutcome::Response(head(url, response)),
+            None => RequestOutcome::Failed,
+        };
         match gateway.observe(connection, outcome) {
             ConnectionStatus::Connected => None,
             status => Some(format!("{connection}; status={}", status.as_str())),
         }
+    }
+}
+
+/// What a connection gets to see of a response: its status, the cookies it
+/// sets, and where it redirects.
+fn head(url: &Url, response: &reqwest::Response) -> ResponseHead {
+    let text = |value: &HeaderValue| String::from_utf8_lossy(value.as_bytes()).into_owned();
+    ResponseHead {
+        url: url.clone(),
+        status: response.status().as_u16(),
+        set_cookies: response.headers().get_all(SET_COOKIE).iter().map(text).collect(),
+        location: response.headers().get(LOCATION).map(text),
     }
 }
 

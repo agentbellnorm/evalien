@@ -105,7 +105,7 @@ const inbox = await (await fetch("https://app.kivra.com/api/…")).json();  // c
 
 ## Security properties
 
-- **The agent never sees secrets.** Tokens, cookies, keys and autostart tokens stay in the gateway and the vault. Responses are stripped of `Set-Cookie` and of headers that echo credentials.
+- **The agent never sees secrets.** Tokens, cookies and keys stay in the gateway and the vault. Responses are stripped of `Set-Cookie` and of headers that echo credentials. Sign-in links reach the human as notices; the model sees them as `<link sent to the human>`.
 - **Credentials only go where they belong.** Each connection is attached only to requests for its listed origins, over HTTPS. A redirect to another origin is followed without credentials.
 - **Logins can't be forged from outside.** The OAuth callback accepts only codes for a `state` the gateway issued, and a code is useless without the PKCE verifier, which never leaves the gateway.
 - **At rest.** The vault is encrypted with a key that exists only in the Kubernetes Secret.
@@ -141,5 +141,5 @@ key = { secret = "EXAMPLE_API_KEY" }
 
 1. **Vault and API keys.** *Done.* The encrypted vault, the gateway port in `fetch`, origin matching, response stripping, `connections.list()`, metrics.
 2. **OAuth with Google Calendar.** *Done.* The callback endpoint and its Tailscale ingress, PKCE, refresh, `connect` for OAuth.
-3. **BankID.** The shared flow and keepalive, then Kivra and the bank as the first providers, once their flows are reverse-engineered.
+3. **BankID.** *SEB done.* The shared flow (start, the autostart link, polling, finishing), cookie sessions in the vault, and a keepalive that lets a session go after `keepalive_for` unused. Kivra next.
 4. **Later.** Proton, BankID QR, signing.

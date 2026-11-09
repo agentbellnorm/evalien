@@ -40,6 +40,12 @@ data:
     client_id = { secret = "GOOGLE_CLIENT_ID" }
     client_secret = { secret = "GOOGLE_CLIENT_SECRET" }
 
+    [connections.seb]
+    kind = "bankid"
+    provider = "seb"
+    origins = ["https://apps.seb.se"]
+    keepalive_for = "1h"
+
     # [connections.example]
     # kind = "api_key"
     # origins = ["https://api.example.com"]

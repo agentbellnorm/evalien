@@ -12,7 +12,8 @@ use evalien::connectors::config::{self, CallbackConfig, ConnectionConfig, Gatewa
 use evalien::connectors::{Connectors, OAuthClient, Vault, VaultKey, serve_callback};
 use evalien::db::MemoryStore;
 use evalien::domain::{
-    Attachment, ConnectionStatus, Event, Gateway, Origin, RequestOutcome, Secret, Seq, Timestamp, Trajectory, Usd,
+    Attachment, ConnectionStatus, Event, Gateway, Origin, RequestOutcome, ResponseHead, Secret, Seq, Timestamp,
+    Trajectory, Usd,
 };
 use evalien::evaluation::{Capabilities, Limits, Sandbox, SandboxHost};
 use evalien::metrics::Metrics;
@@ -53,14 +54,18 @@ fn api_keys() -> Arc<Connectors> {
     Connectors::new(config, log(), |_| {}).unwrap()
 }
 
-fn origin(url: &str) -> Origin {
-    Origin::of(&Url::parse(url).unwrap())
+fn url(text: &str) -> Url {
+    Url::parse(text).unwrap()
+}
+
+fn status(n: u16) -> RequestOutcome {
+    RequestOutcome::Response(ResponseHead::status(url("https://example.com/"), n))
 }
 
 #[test]
 fn credentials_go_only_to_the_exact_origins_of_their_connection() {
     let gateway = api_keys();
-    match gateway.attach(&origin("https://api.weather.example/v1/forecast?city=sthlm")) {
+    match gateway.attach(&url("https://api.weather.example/v1/forecast?city=sthlm")) {
         Attachment::Credentials { connection, headers } => {
             assert_eq!(connection, "weather");
             assert_eq!(
@@ -71,7 +76,7 @@ fn credentials_go_only_to_the_exact_origins_of_their_connection() {
         other => panic!("expected credentials, got {other:?}"),
     }
     assert!(matches!(
-        gateway.attach(&origin("https://maps.weather.example:8443/tiles")),
+        gateway.attach(&url("https://maps.weather.example:8443/tiles")),
         Attachment::Credentials { .. }
     ));
     for elsewhere in [
@@ -81,7 +86,7 @@ fn credentials_go_only_to_the_exact_origins_of_their_connection() {
         "https://api.weather.example.evil/", // a lookalike
         "https://example.com/",
     ] {
-        assert_eq!(gateway.attach(&origin(elsewhere)), Attachment::Nothing, "{elsewhere}");
+        assert_eq!(gateway.attach(&url(elsewhere)), Attachment::Nothing, "{elsewhere}");
     }
 }
 
@@ -89,11 +94,11 @@ fn credentials_go_only_to_the_exact_origins_of_their_connection() {
 fn outcomes_are_counted_per_connection_and_an_api_key_stays_connected() {
     let gateway = api_keys();
     for outcome in [
-        RequestOutcome::Status(200),
-        RequestOutcome::Status(204),
-        RequestOutcome::Status(401),
-        RequestOutcome::Status(404),
-        RequestOutcome::Status(503),
+        status(200),
+        status(204),
+        status(401),
+        status(404),
+        status(503),
         RequestOutcome::Failed,
     ] {
         assert_eq!(gateway.observe("weather", outcome), ConnectionStatus::Connected);
@@ -145,8 +150,8 @@ async fn the_agent_sees_its_connections_but_never_their_credentials() {
 #[test]
 fn metrics_report_requests_and_status_per_connection() {
     let gateway: Arc<dyn Gateway> = api_keys();
-    gateway.observe("weather", RequestOutcome::Status(200));
-    gateway.observe("weather", RequestOutcome::Status(401));
+    gateway.observe("weather", status(200));
+    gateway.observe("weather", status(401));
     let metrics = Metrics::new(Usd::new(1.0).unwrap(), Usd::ZERO, Timestamp::now()).with_gateway(gateway);
     let text = metrics.render(Timestamp::now());
     assert!(
@@ -285,7 +290,7 @@ fn sign_in_link(log: &Trajectory) -> HashMap<String, String> {
 }
 
 fn bearer(gateway: &Connectors) -> Option<String> {
-    match gateway.attach(&origin("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
+    match gateway.attach(&url("https://www.googleapis.com/calendar/v3/users/me/calendarList")) {
         Attachment::Credentials { headers, .. } => Some(headers[0].1.expose().to_owned()),
         _ => None,
     }
@@ -307,7 +312,7 @@ async fn an_oauth_login_runs_from_connect_to_signed_requests() {
     let gateway = oauth(&base, &dir.path().join("vault.db"), log.clone());
     gateway.start().await;
     assert_eq!(
-        gateway.attach(&origin("https://www.googleapis.com/")),
+        gateway.attach(&url("https://www.googleapis.com/")),
         Attachment::NotConnected {
             connection: "calendar".into(),
             status: ConnectionStatus::NotConnected
@@ -384,7 +389,7 @@ async fn a_restart_refreshes_from_the_vault_and_a_revoked_grant_asks_for_a_new_l
 
     // The grant is revoked: a 401 prompts a refresh, which is refused.
     provider.refuse.store(true, Ordering::SeqCst);
-    gateway.observe("calendar", RequestOutcome::Status(401));
+    gateway.observe("calendar", status(401));
     until(|| gateway.connections()[0].status == ConnectionStatus::Expired).await;
     assert!(
         notices(&log)
@@ -393,7 +398,7 @@ async fn a_restart_refreshes_from_the_vault_and_a_revoked_grant_asks_for_a_new_l
             .contains("calendar needs signing in again")
     );
     assert_eq!(
-        gateway.attach(&origin("https://www.googleapis.com/")),
+        gateway.attach(&url("https://www.googleapis.com/")),
         Attachment::NotConnected {
             connection: "calendar".into(),
             status: ConnectionStatus::Expired

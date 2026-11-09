@@ -22,7 +22,7 @@ pub fn render_entry(entry: &Entry) -> String {
         Event::Stdin { text } => ("stdin".to_owned(), text.clone()),
         Event::Stdout { text } => ("stdout".to_owned(), text.clone()),
         Event::Stderr { text } => ("stderr".to_owned(), text.clone()),
-        Event::Notice { text } => ("notice".to_owned(), text.clone()),
+        Event::Notice { text } => ("notice".to_owned(), without_links(text)),
         Event::Result { eval, outcome, text } => (format!("result eval={eval} {}", outcome.as_str()), text.clone()),
         Event::Generation { through, generation } => {
             let u = &generation.usage;
@@ -90,4 +90,41 @@ fn clip(seq: Seq, body: &str) -> String {
     let tail: String = body.chars().skip(length - half).collect();
     let omitted = length - MAX_ENTRY_CHARS;
     format!("{head}\n… {omitted} characters omitted; full text in trajectory seq {seq} …\n{tail}")
+}
+
+/// Links in notices are for the human (a sign-in page, an autostart link for
+/// BankID); the model only needs to know one was sent.
+fn without_links(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            if word.starts_with("https://") || word.starts_with("http://") {
+                "<link sent to the human>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notices_reach_the_model_without_their_links() {
+        let entry = Entry {
+            seq: Seq::new(3),
+            timestamp: "2026-11-09T12:00:00.000Z".parse().unwrap(),
+            event: Event::Notice {
+                text: "Sign in to seb with BankID on your phone: https://app.bankid.com/?autostarttoken=secret&redirect=null".into(),
+            },
+        };
+        let rendered = render_entry(&entry);
+        assert!(!rendered.contains("autostarttoken"), "{rendered}");
+        assert!(
+            rendered.contains("Sign in to seb with BankID on your phone: <link sent to the human>"),
+            "{rendered}"
+        );
+    }
 }

@@ -43,6 +43,7 @@ impl fmt::Display for Origin {
 pub enum ConnectionKind {
     ApiKey,
     OAuth,
+    BankId,
 }
 
 impl ConnectionKind {
@@ -50,6 +51,7 @@ impl ConnectionKind {
         match self {
             ConnectionKind::ApiKey => "api_key",
             ConnectionKind::OAuth => "oauth",
+            ConnectionKind::BankId => "bankid",
         }
     }
 }
@@ -116,19 +118,41 @@ pub enum Attachment {
 }
 
 /// How a request through a connection ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestOutcome {
-    Status(u16),
+    Response(ResponseHead),
     /// No response: DNS, connection or timeout.
     Failed,
+}
+
+/// What a connection learns from a response: sessions renew their cookies,
+/// and a signed-out session often shows itself as a redirect to a login page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResponseHead {
+    pub url: url::Url,
+    pub status: u16,
+    pub set_cookies: Vec<String>,
+    pub location: Option<String>,
+}
+
+impl ResponseHead {
+    /// A response with just a status, as for an API that sets no cookies.
+    pub fn status(url: url::Url, status: u16) -> Self {
+        ResponseHead {
+            url,
+            status,
+            set_cookies: Vec::new(),
+            location: None,
+        }
+    }
 }
 
 /// A login in progress. Resolves to the connection's status once it's done.
 pub type Connecting<'a> = Pin<Box<dyn Future<Output = Result<ConnectionStatus, String>> + Send + 'a>>;
 
 pub trait Gateway: Send + Sync {
-    /// What to add to a request for `origin`.
-    fn attach(&self, origin: &Origin) -> Attachment;
+    /// What to add to a request for `url`.
+    fn attach(&self, url: &url::Url) -> Attachment;
     /// Learn from how a request through `connection` went, and return the
     /// connection's status afterwards.
     fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;

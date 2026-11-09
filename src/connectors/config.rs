@@ -26,6 +26,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use reqwest::Url;
@@ -34,6 +35,7 @@ use serde::Deserialize;
 use crate::domain::{Origin, Secret};
 
 use super::{
+    bankid::BankIdProvider,
     oauth::OAuthClient,
     vault::{VaultError, VaultKey},
 };
@@ -69,6 +71,11 @@ pub enum KindConfig {
     ApiKey { header: String, value: Secret },
     /// Bearer tokens from an OAuth login, refreshed as needed.
     OAuth { client: Box<OAuthClient> },
+    /// Session cookies from a Mobile BankID login, kept alive while in use.
+    BankId {
+        provider: Box<BankIdProvider>,
+        keepalive_for: Duration,
+    },
 }
 
 #[derive(Deserialize)]
@@ -94,7 +101,17 @@ enum Spec {
         client_id: SecretRef,
         client_secret: SecretRef,
     },
+    #[serde(rename = "bankid")]
+    BankId {
+        provider: String,
+        origins: Vec<String>,
+        /// How long to keep the session alive after the agent last used it, e.g. "1h".
+        keepalive_for: Option<String>,
+    },
 }
+
+/// How long a BankID session is kept alive after its last use, unless configured.
+pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +171,14 @@ pub fn read(env: &HashMap<String, String>, state_dir: &Path) -> Result<GatewayCo
     let needs_login = connections
         .iter()
         .any(|connection| matches!(connection.kind, KindConfig::OAuth { .. }));
+    let keeps_sessions = connections
+        .iter()
+        .any(|connection| matches!(connection.kind, KindConfig::BankId { .. }));
+    if keeps_sessions && vault.is_none() {
+        return Err(
+            "BankID connections keep their session in the vault: set VAULT_KEY (openssl rand -base64 32)".into(),
+        );
+    }
     if needs_login && vault.is_none() {
         return Err("OAuth connections keep tokens in the vault: set VAULT_KEY (openssl rand -base64 32)".into());
     }
@@ -233,6 +258,25 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
                     },
                 )
             }
+            Spec::BankId {
+                provider,
+                origins,
+                keepalive_for,
+            } => {
+                let provider = BankIdProvider::for_name(&provider)
+                    .ok_or_else(|| fail(format!("unknown BankID provider {provider:?}; known: seb")))?;
+                let keepalive_for = match keepalive_for {
+                    Some(text) => humantime::parse_duration(&text).map_err(|e| fail(format!("keepalive_for: {e}")))?,
+                    None => DEFAULT_KEEPALIVE,
+                };
+                (
+                    origins,
+                    KindConfig::BankId {
+                        provider: Box::new(provider),
+                        keepalive_for,
+                    },
+                )
+            }
         };
         let origins = origins
             .iter()
@@ -300,6 +344,42 @@ mod tests {
         assert!(matches!(connections[0].kind, KindConfig::OAuth { .. }));
         let unknown = parse(&text.replace("\"google\"", "\"myspace\""), &env()).err().unwrap();
         assert!(unknown.contains("unknown OAuth provider"), "{unknown}");
+    }
+
+    #[test]
+    fn a_bankid_connection_names_its_provider_and_how_long_to_keep_it() {
+        let text = |keepalive: &str, provider: &str| {
+            format!(
+                "[connections.seb]\nkind = \"bankid\"\nprovider = \"{provider}\"\norigins = [\"https://apps.seb.se\"]\n{keepalive}"
+            )
+        };
+        let configured = parse(&text("keepalive_for = \"30m\"", "seb"), &env()).unwrap();
+        assert!(
+            matches!(configured[0].kind, KindConfig::BankId { keepalive_for, .. } if keepalive_for == Duration::from_secs(1800))
+        );
+        let default = parse(&text("", "seb"), &env()).unwrap();
+        assert!(
+            matches!(default[0].kind, KindConfig::BankId { keepalive_for, .. } if keepalive_for == DEFAULT_KEEPALIVE)
+        );
+        assert!(
+            parse(&text("", "nordea"), &env())
+                .err()
+                .unwrap()
+                .contains("unknown BankID provider")
+        );
+        assert!(
+            parse(&text("keepalive_for = \"soon\"", "seb"), &env())
+                .err()
+                .unwrap()
+                .contains("keepalive_for")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("connections.toml");
+        std::fs::write(&file, text("", "seb")).unwrap();
+        let mut env = env();
+        env.insert("CONNECTIONS_FILE".into(), file.display().to_string());
+        assert!(read(&env, dir.path()).err().unwrap().contains("VAULT_KEY"));
     }
 
     #[test]

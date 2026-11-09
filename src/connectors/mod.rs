@@ -7,17 +7,24 @@
 //!   the sign-in link as a notice, the callback finishes the login, and the
 //!   refresh token goes to the [`Vault`]. Access tokens live in memory and are
 //!   refreshed ahead of expiry, so attaching them never waits on the network.
+//! - BankID connections log in the same way, with an autostart link for the
+//!   BankID app. Their session is cookies, kept in the vault and kept alive
+//!   while the agent uses it.
 //!
 //! See docs/connectors.md.
 
+mod bankid;
+mod bankid_session;
+mod browser;
 mod callback;
 pub mod config;
 mod oauth;
+mod seb;
 mod vault;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, Weak},
     time::{Duration, Instant},
 };
 
@@ -29,9 +36,13 @@ use crate::domain::{
     RequestOutcome, Secret, Trajectory,
 };
 
+use bankid_session::BankId;
+
+pub use bankid::{BankIdProvider, Progress};
 pub use callback::serve as serve_callback;
 pub use config::{ConnectionConfig, GatewayConfig, KindConfig};
 pub use oauth::{OAuthClient, OAuthError};
+pub use seb::Seb;
 pub use vault::{Vault, VaultError, VaultKey};
 
 /// Refresh access tokens this long before they expire.
@@ -42,6 +53,8 @@ const REFRESH_RETRY: Duration = Duration::from_secs(30);
 const REFRESH_TOKEN: &str = "refresh_token";
 
 pub struct Connectors {
+    /// Itself, for spawning work that outlives a call, like a BankID login.
+    this: Weak<Connectors>,
     connections: Vec<Connection>,
     /// Which connection serves each origin. Config allows one per origin.
     by_origin: HashMap<Origin, usize>,
@@ -62,6 +75,7 @@ struct Connection {
 enum Credentials {
     ApiKey { header: String, value: Secret },
     OAuth(Box<OAuth>),
+    BankId(Box<BankId>),
 }
 
 struct OAuth {
@@ -107,36 +121,37 @@ impl Connectors {
             .build()
             .map_err(|e| e.to_string())?;
         let mut by_origin = HashMap::new();
-        let connections = config
-            .connections
-            .into_iter()
-            .enumerate()
-            .map(|(index, config)| {
-                for origin in &config.origins {
-                    by_origin.insert(origin.clone(), index);
-                }
-                let credentials = match config.kind {
-                    KindConfig::ApiKey { header, value } => Credentials::ApiKey { header, value },
-                    KindConfig::OAuth { client } => Credentials::OAuth(Box::new(OAuth {
-                        client: *client,
-                        session: Mutex::new(Session {
-                            status: ConnectionStatus::NotConnected,
-                            access: None,
-                            login: None,
-                        }),
-                        wake: Notify::new(),
-                    })),
-                };
-                Connection {
-                    name: config.name,
-                    origins: config.origins,
-                    credentials,
-                    requests: Mutex::new(RequestCounts::default()),
-                }
-            })
-            .collect();
+        let mut connections = Vec::new();
+        for (index, config) in config.connections.into_iter().enumerate() {
+            for origin in &config.origins {
+                by_origin.insert(origin.clone(), index);
+            }
+            let credentials = match config.kind {
+                KindConfig::ApiKey { header, value } => Credentials::ApiKey { header, value },
+                KindConfig::OAuth { client } => Credentials::OAuth(Box::new(OAuth {
+                    client: *client,
+                    session: Mutex::new(Session {
+                        status: ConnectionStatus::NotConnected,
+                        access: None,
+                        login: None,
+                    }),
+                    wake: Notify::new(),
+                })),
+                KindConfig::BankId {
+                    provider,
+                    keepalive_for,
+                } => Credentials::BankId(Box::new(BankId::new(*provider, keepalive_for)?)),
+            };
+            connections.push(Connection {
+                name: config.name,
+                origins: config.origins,
+                credentials,
+                requests: Mutex::new(RequestCounts::default()),
+            });
+        }
         let redirect = config.callback.map(|callback| callback.redirect);
-        Ok(Arc::new(Connectors {
+        Ok(Arc::new_cyclic(|this| Connectors {
+            this: this.clone(),
             connections,
             by_origin,
             vault,
@@ -147,18 +162,24 @@ impl Connectors {
         }))
     }
 
-    /// Restore OAuth sessions from the vault, refresh their access tokens,
-    /// and keep them fresh from now on.
+    /// Restore sessions from the vault, check or refresh them, and keep them
+    /// fresh from now on.
     pub async fn start(self: &Arc<Self>) {
         for (index, connection) in self.connections.iter().enumerate() {
-            let Credentials::OAuth(oauth) = &connection.credentials else {
-                continue;
-            };
-            if self.refresh_token(connection).is_some() {
-                lock(&oauth.session).status = ConnectionStatus::Connected;
-                self.refresh(connection, oauth).await;
+            match &connection.credentials {
+                Credentials::ApiKey { .. } => {}
+                Credentials::OAuth(oauth) => {
+                    if self.refresh_token(connection).is_some() {
+                        lock(&oauth.session).status = ConnectionStatus::Connected;
+                        self.refresh(connection, oauth).await;
+                    }
+                    tokio::spawn(self.clone().keep_fresh(index));
+                }
+                Credentials::BankId(bankid) => {
+                    self.restore_bankid(connection, bankid).await;
+                    tokio::spawn(self.clone().keep_bankid_alive(index));
+                }
             }
-            tokio::spawn(self.clone().keep_fresh(index));
         }
     }
 
@@ -379,6 +400,7 @@ impl Connection {
         match self.credentials {
             Credentials::ApiKey { .. } => ConnectionKind::ApiKey,
             Credentials::OAuth(_) => ConnectionKind::OAuth,
+            Credentials::BankId(_) => ConnectionKind::BankId,
         }
     }
 
@@ -388,13 +410,18 @@ impl Connection {
         match &self.credentials {
             Credentials::ApiKey { .. } => ConnectionStatus::Connected,
             Credentials::OAuth(oauth) => lock(&oauth.session).status,
+            Credentials::BankId(bankid) => lock(&bankid.session).status,
         }
     }
 }
 
 impl Gateway for Connectors {
-    fn attach(&self, origin: &Origin) -> Attachment {
-        let Some(connection) = self.by_origin.get(origin).map(|&index| &self.connections[index]) else {
+    fn attach(&self, url: &Url) -> Attachment {
+        let Some(connection) = self
+            .by_origin
+            .get(&Origin::of(url))
+            .map(|&index| &self.connections[index])
+        else {
             return Attachment::Nothing;
         };
         let name = connection.name.clone();
@@ -426,6 +453,24 @@ impl Gateway for Connectors {
                     }
                 }
             }
+            Credentials::BankId(bankid) => {
+                let mut session = lock(&bankid.session);
+                if session.status != ConnectionStatus::Connected {
+                    return Attachment::NotConnected {
+                        connection: name,
+                        status: session.status,
+                    };
+                }
+                session.last_used = Instant::now();
+                let headers = bankid
+                    .browser
+                    .cookie_header(url)
+                    .map(|cookies| ("Cookie".to_owned(), cookies));
+                Attachment::Credentials {
+                    connection: name,
+                    headers: headers.into_iter().collect(),
+                }
+            }
         }
     }
 
@@ -433,18 +478,25 @@ impl Gateway for Connectors {
         let Some(connection) = self.named(connection) else {
             return ConnectionStatus::NotConnected;
         };
-        let mut requests = lock(&connection.requests);
-        match outcome {
-            RequestOutcome::Status(401 | 403) => requests.rejected += 1,
-            RequestOutcome::Status(status) if status >= 500 => requests.server_errors += 1,
-            RequestOutcome::Status(status) if status >= 400 => requests.client_errors += 1,
-            RequestOutcome::Status(_) => requests.succeeded += 1,
-            RequestOutcome::Failed => requests.failed += 1,
+        {
+            let mut requests = lock(&connection.requests);
+            match &outcome {
+                RequestOutcome::Response(head) => match head.status {
+                    401 | 403 => requests.rejected += 1,
+                    status if status >= 500 => requests.server_errors += 1,
+                    status if status >= 400 => requests.client_errors += 1,
+                    _ => requests.succeeded += 1,
+                },
+                RequestOutcome::Failed => requests.failed += 1,
+            }
         }
-        drop(requests);
-        // A rejected token may just be stale: refresh now rather than at expiry.
-        if let (RequestOutcome::Status(401), Credentials::OAuth(oauth)) = (outcome, &connection.credentials) {
-            oauth.wake.notify_one();
+        if let RequestOutcome::Response(head) = &outcome {
+            match &connection.credentials {
+                // A rejected token may just be stale: refresh now rather than at expiry.
+                Credentials::OAuth(oauth) if head.status == 401 => oauth.wake.notify_one(),
+                Credentials::BankId(bankid) => self.observe_bankid(connection, bankid, head),
+                _ => {}
+            }
         }
         connection.status()
     }
@@ -465,9 +517,18 @@ impl Gateway for Connectors {
     fn connect(&self, name: &str, timeout: Duration) -> Connecting<'_> {
         let name = name.to_owned();
         Box::pin(async move {
-            let connection = self
-                .named(&name)
+            let index = self
+                .connections
+                .iter()
+                .position(|connection| connection.name == name)
                 .ok_or_else(|| format!("no connection named {name:?}"))?;
+            let connection = &self.connections[index];
+            if let Credentials::BankId(_) = &connection.credentials {
+                let Some(waiting) = self.begin_bankid(index)? else {
+                    return Ok(ConnectionStatus::Connected);
+                };
+                return wait_for_login(&name, waiting, timeout).await;
+            }
             let Credentials::OAuth(oauth) = &connection.credentials else {
                 return Ok(connection.status());
             };
@@ -488,6 +549,21 @@ impl Gateway for Connectors {
                 }
             }
         })
+    }
+}
+
+/// Wait for a login to finish. A BankID login keeps running after a timeout
+/// here, so a later `connect` can still catch it.
+async fn wait_for_login(name: &str, mut waiting: Waiting, timeout: Duration) -> Result<ConnectionStatus, String> {
+    let finished = tokio::time::timeout(timeout, waiting.wait_for(Option::is_some))
+        .await
+        .map(|result| result.map(|outcome| outcome.clone()));
+    match finished {
+        Ok(Ok(Some(Ok(())))) => Ok(ConnectionStatus::Connected),
+        Ok(Ok(Some(Err(message)))) => Err(message),
+        Ok(Ok(None)) => Err("the login ended without a result".into()),
+        Ok(Err(_)) => Err("the login was dropped".into()),
+        Err(_) => Err(format!("{name}: no sign-in within {}s", timeout.as_secs())),
     }
 }
 
