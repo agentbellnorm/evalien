@@ -24,7 +24,7 @@ never sees a token, a cookie or a key.
 ## Architecture
 
 ```
- sandbox ── fetch(url) ──▶ fetch capability ──▶ Gateway::prepare ──▶ network
+ sandbox ── fetch(url) ──▶ fetch capability ──▶ Gateway::attach ──▶ network
                                 │                     │
                                 │                     ├── vault (tokens, cookies)
                                 ◀── response ◀── Gateway::observe (401 → needs login)
@@ -38,55 +38,79 @@ never sees a token, a cookie or a key.
 - The `fetch` capability (in `evaluation/`) sees the gateway through a domain port, so neither module imports the other. The composition root wires them.
 - Login flows run as tasks in the runtime. Their notices go into the trajectory, and from there out through the chat relay like any other notice.
 
-### The port the fetch capability uses
+### The port
 
 ```rust
 pub trait Gateway: Send + Sync {
-    /// What to add to a request for `origin`.
-    fn attach(&self, origin: &Origin) -> Attachment;
+    /// What to add to a request for `url`: cookies need the path, not just the origin.
+    fn attach(&self, url: &Url) -> Attachment;
     /// Learn from how a request went, and return the connection's status afterwards.
     fn observe(&self, connection: &str, outcome: RequestOutcome) -> ConnectionStatus;
     fn connections(&self) -> Vec<ConnectionInfo>;
+    fn skill(&self, connection: &str) -> Option<String>;
+    /// Sign in if needed. Concurrent calls wait on the same login.
+    fn connect(&self, connection: &str, timeout: Duration) -> Connecting<'_>;
 }
 ```
 
-The port is synchronous: attaching credentials is a lookup, never a network
-call. OAuth refreshes happen in the background ahead of expiry, so a request
-never waits on one. Redirects are followed by `fetch` itself, and each hop asks
-the gateway for its own origin.
+The port is synchronous apart from `connect`: attaching credentials is a
+lookup, never a network call. OAuth refreshes happen in the background ahead
+of expiry, so a request never waits on one. Redirects are followed by `fetch`
+itself, and each hop asks the gateway for its own URL. The agent hears about
+the first hop whose connection needs attention.
 
-### Login types
+### Inside `connectors/`
 
-Each type defines its steps once; each service implements them.
+| Module | What it is |
+| --- | --- |
+| `config` | The TOML file and environment, checked, as plain data. Providers are still names here |
+| `providers` | What each provider name means: its implementation and its skill. Produces a `Service` per connection |
+| `mod` (`Connectors`) | The registry: routes each request to a connection by origin, counts outcomes, dispatches to the session |
+| `api_key`, `oauth_session`, `bankid_session` | One session per kind. Each owns its state and runs its own background work (refreshing, keepalives, logins) |
+| `oauth`, `bankid`, `seb` | The protocols: OAuth 2.1 with PKCE, and the BankID steps each bank implements |
+| `login` | A login in progress, shared by everyone waiting on it |
+| `callback` | The OAuth callback endpoint. It sees only the pending OAuth logins |
+| `vault`, `browser`, `context` | Encrypted storage, scoped per connection; a cookie-keeping HTTP client; what every session gets from the process |
+
+The composition root (`main.rs`, and `bin/connect.rs` for trying a connection from the terminal) does the wiring:
+config → `providers::resolve` → open the vault, build the HTTP client →
+`Connectors::start(services, deps)` → the callback server with
+`connectors.oauth_logins()` → the same `Arc` as the port for `fetch`,
+`connections` and metrics.
+
+A BankID provider implements the bank's steps:
 
 ```rust
-trait OAuthProvider {
-    fn authorization_url(&self, state: &State, challenge: &PkceChallenge) -> Url;
-    async fn exchange(&self, code: &AuthCode, verifier: &PkceVerifier) -> Result<Tokens>;
-    async fn refresh(&self, refresh_token: &Secret) -> Result<Tokens>;
-}
-
-trait BankIdProvider {
+impl Seb {
     /// Start an order. The autostart token goes to the human, never to the agent.
-    async fn start(&self, http: &Session) -> Result<Order>;
-    async fn poll(&self, http: &Session, order: &Order) -> Result<OrderStatus>;
+    async fn start(&self, browser: &Browser) -> Result<(SebLogin, Secret), String>;
+    async fn poll(&self, browser: &Browser, login: &mut SebLogin) -> Result<Progress, String>;
     /// Turn a completed order into a logged-in session (cookies).
-    async fn finish(&self, http: &Session, order: &Order) -> Result<()>;
-    /// A cheap request that keeps the session alive, and how often to send it.
-    fn keepalive(&self) -> Option<(Request, Duration)>;
+    async fn finish(&self, browser: &Browser, login: SebLogin) -> Result<(), String>;
+    async fn cancel(&self, browser: &Browser, login: &SebLogin);
+    /// A cheap request that shows the session is alive, and keeps it so.
+    fn keepalive(&self) -> Url;
+    /// Whether a response says the session has ended.
+    fn signed_out(&self, response: &ResponseHead) -> bool;
 }
 ```
 
-API keys need no flow: a header template filled from the Secret.
+`BankIdProvider` is an enum over the banks for now. With a second bank it
+becomes a trait with an associated order type. API keys need no flow: a header
+template filled from the Secret.
 
-The shared gateway does everything around those steps: PKCE and `state`, the
-callback, the BankID poll loop and its expiry, the notices, storing results in
-the vault, refreshing, keepalives, and the connection state machine:
+The sessions do everything around those steps: PKCE and `state`, the BankID
+poll loop and its expiry (`BankIdTiming`), the notices, storing results in the
+vault, refreshing, keepalives, and the connection state machine:
 
 ```
 not_connected ──connect──▶ logging_in ──done──▶ connected ──401/expiry──▶ expired ──connect──▶ logging_in
                                └──timeout/failure──▶ not_connected
 ```
+
+An OAuth login is abandoned once nobody is waiting for it. A BankID login
+runs to its order's lifetime whether or not anyone waits, so a later
+`connect` can still catch it.
 
 ## What the agent sees
 

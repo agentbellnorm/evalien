@@ -9,18 +9,19 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-use super::Connectors;
+use super::oauth_session::OAuthLogins;
 
 const MAX_REQUEST: usize = 16 << 10;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CALLBACK_PATH: &str = "/oauth/callback";
 
 /// Answer callbacks on `listener` until the process ends.
-pub async fn serve(listener: TcpListener, connectors: Arc<Connectors>, debug: fn(&str)) {
+pub async fn serve(listener: TcpListener, logins: OAuthLogins, debug: fn(&str)) {
+    let logins = Arc::new(logins);
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(answer(stream, connectors.clone()));
+                tokio::spawn(answer(stream, logins.clone()));
             }
             Err(error) => {
                 debug(&format!("connectors: accepting a callback failed: {error}"));
@@ -30,7 +31,7 @@ pub async fn serve(listener: TcpListener, connectors: Arc<Connectors>, debug: fn
     }
 }
 
-async fn answer(mut stream: TcpStream, connectors: Arc<Connectors>) {
+async fn answer(mut stream: TcpStream, logins: Arc<OAuthLogins>) {
     let Ok(Some(head)) = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await else {
         return;
     };
@@ -45,8 +46,8 @@ async fn answer(mut stream: TcpStream, connectors: Arc<Connectors>) {
                 let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
                 let state = query.get("state").map(String::as_str).unwrap_or_default();
                 let result = match (query.get("code"), query.get("error")) {
-                    (_, Some(error)) => connectors.refuse(state, error),
-                    (Some(code), None) => connectors.complete(state, code).await,
+                    (_, Some(error)) => logins.refuse(state, error),
+                    (Some(code), None) => logins.complete(state, code).await,
                     (None, None) => Err("the provider sent neither a code nor an error".to_owned()),
                 };
                 match result {

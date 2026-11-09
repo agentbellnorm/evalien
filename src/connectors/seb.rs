@@ -17,12 +17,7 @@ use serde_json::json;
 
 use crate::domain::{ResponseHead, Secret};
 
-use std::time::Duration;
-
-use super::{
-    bankid::{ORDER_LIFETIME, Progress},
-    browser::Browser,
-};
+use super::{bankid::Progress, browser::Browser};
 
 const CLIENT_ID: &str = "cps";
 const HOME: &str = "/cps/home";
@@ -35,8 +30,6 @@ pub struct Seb {
     id: Url,
     /// The internet bank, apps.seb.se.
     apps: Url,
-    poll_every: Duration,
-    order_lifetime: Duration,
 }
 
 /// A login in progress.
@@ -61,6 +54,9 @@ struct OrderStatus {
 }
 
 impl Seb {
+    /// How the agent uses the internet bank.
+    pub const SKILL: &str = include_str!("skills/seb.md");
+
     pub fn production() -> Self {
         Seb::new(
             Url::parse("https://id.seb.se").expect("a valid URL"),
@@ -70,29 +66,7 @@ impl Seb {
 
     /// SEB at other addresses, for tests.
     pub fn new(id: Url, apps: Url) -> Self {
-        Seb {
-            id,
-            apps,
-            poll_every: Duration::from_secs(2),
-            order_lifetime: ORDER_LIFETIME,
-        }
-    }
-
-    /// Poll faster and give up sooner, for tests.
-    pub fn with_timing(self, poll_every: Duration, order_lifetime: Duration) -> Self {
-        Seb {
-            poll_every,
-            order_lifetime,
-            ..self
-        }
-    }
-
-    pub fn poll_every(&self) -> Duration {
-        self.poll_every
-    }
-
-    pub fn order_lifetime(&self) -> Duration {
-        self.order_lifetime
+        Seb { id, apps }
     }
 
     pub async fn start(&self, browser: &Browser) -> Result<(SebLogin, Secret), String> {

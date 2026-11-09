@@ -82,24 +82,9 @@ impl OAuthClient {
         }
     }
 
-    /// A known provider, by the name used in config.
-    pub fn for_provider(provider: &str, client_id: String, client_secret: Secret, scopes: Vec<String>) -> Option<Self> {
-        match provider {
-            "google" => Some(OAuthClient {
-                authorize: Url::parse("https://accounts.google.com/o/oauth2/v2/auth").ok()?,
-                token: Url::parse("https://oauth2.googleapis.com/token").ok()?,
-                client_id,
-                client_secret,
-                scopes,
-                // A refresh token, every time the human consents.
-                extra: vec![
-                    ("access_type", "offline"),
-                    ("prompt", "consent"),
-                    ("include_granted_scopes", "true"),
-                ],
-            }),
-            _ => None,
-        }
+    /// Extra authorization parameters the provider needs.
+    pub fn with_parameters(self, extra: Vec<(&'static str, &'static str)>) -> Self {
+        OAuthClient { extra, ..self }
     }
 
     pub fn authorization_url(&self, redirect: &Url, state: &str, challenge: &str) -> Url {
@@ -206,40 +191,29 @@ fn refusal(status: u16, body: &str) -> OAuthError {
 mod tests {
     use super::*;
 
-    fn google() -> OAuthClient {
-        OAuthClient::for_provider(
-            "google",
-            "client-1.apps.googleusercontent.com".into(),
-            Secret::new("shh"),
-            vec![
-                "https://www.googleapis.com/auth/calendar.readonly".into(),
-                "openid".into(),
-            ],
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn the_authorization_url_carries_pkce_state_scopes_and_offline_access() {
+    fn the_authorization_url_carries_pkce_state_scopes_and_the_providers_parameters() {
+        let client = OAuthClient::new(
+            Url::parse("https://accounts.example/authorize").unwrap(),
+            Url::parse("https://accounts.example/token").unwrap(),
+            "client-1".into(),
+            Secret::new("shh"),
+            vec!["calendar.readonly".into(), "openid".into()],
+        )
+        .with_parameters(vec![("access_type", "offline")]);
         let redirect = Url::parse("https://evalien.bushnet.diy/oauth/callback").unwrap();
-        let url = google().authorization_url(&redirect, "state-123", "challenge-abc");
+        let url = client.authorization_url(&redirect, "state-123", "challenge-abc");
         let query: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
-        assert_eq!(url.host_str(), Some("accounts.google.com"));
+        assert_eq!(url.host_str(), Some("accounts.example"));
         assert_eq!(query["response_type"], "code");
         assert_eq!(query["redirect_uri"], "https://evalien.bushnet.diy/oauth/callback");
-        assert_eq!(
-            query["scope"],
-            "https://www.googleapis.com/auth/calendar.readonly openid"
-        );
+        assert_eq!(query["scope"], "calendar.readonly openid");
         assert_eq!(
             (query["state"].as_str(), query["code_challenge"].as_str()),
             ("state-123", "challenge-abc")
         );
         assert_eq!(query["code_challenge_method"], "S256");
-        assert_eq!(
-            (query["access_type"].as_str(), query["prompt"].as_str()),
-            ("offline", "consent")
-        );
+        assert_eq!(query["access_type"], "offline");
         assert!(
             !url.as_str().contains("shh"),
             "the client secret never goes to the browser"
@@ -273,6 +247,5 @@ mod tests {
             OAuthError::Failed(_)
         ));
         assert!(matches!(refusal(503, "<html>down</html>"), OAuthError::Failed(m) if m.starts_with("503")));
-        assert!(OAuthClient::for_provider("myspace", String::new(), Secret::new(""), vec![]).is_none());
     }
 }

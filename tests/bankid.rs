@@ -12,8 +12,7 @@ use std::{
 };
 
 use base64::Engine;
-use evalien::connectors::config::{ConnectionConfig, GatewayConfig, KindConfig, VaultConfig};
-use evalien::connectors::{BankIdProvider, Connectors, Seb, Vault, VaultKey};
+use evalien::connectors::{BankIdProvider, BankIdTiming, Connectors, Credentials, Deps, Seb, Service, Vault, VaultKey};
 use evalien::db::MemoryStore;
 use evalien::domain::{
     Attachment, ConnectionStatus, Event, Gateway, Origin, Outcome, RequestOutcome, ResponseHead, Seq, Trajectory,
@@ -178,24 +177,28 @@ fn vault_key() -> VaultKey {
     VaultKey::from_base64(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap()
 }
 
-fn gateway(base: &Url, vault: &std::path::Path, log: Arc<Trajectory>) -> Arc<Connectors> {
-    let seb = Seb::new(base.clone(), base.clone()).with_timing(Duration::from_millis(10), Duration::from_millis(500));
-    let config = GatewayConfig {
-        connections: vec![ConnectionConfig {
-            name: "seb".into(),
-            origins: vec![Origin::of(base)],
-            kind: KindConfig::BankId {
-                provider: Box::new(BankIdProvider::Seb(seb)),
-                keepalive_for: Duration::from_secs(3600),
+async fn gateway(base: &Url, vault: &std::path::Path, log: Arc<Trajectory>) -> Arc<Connectors> {
+    let service = Service {
+        name: "seb".into(),
+        origins: vec![Origin::of(base)],
+        skill: Some(Seb::SKILL),
+        credentials: Credentials::BankId {
+            provider: BankIdProvider::Seb(Seb::new(base.clone(), base.clone())),
+            timing: BankIdTiming {
+                poll_every: Duration::from_millis(10),
+                order_lifetime: Duration::from_millis(500),
+                ..BankIdTiming::default()
             },
-        }],
-        vault: Some(VaultConfig {
-            path: vault.to_owned(),
-            key: vault_key(),
-        }),
-        callback: None,
+            keepalive_for: Duration::from_secs(3600),
+        },
     };
-    Connectors::new(config, log, |_| {}).unwrap()
+    let deps = Deps {
+        vault: Some(Arc::new(Vault::open(vault, &vault_key()).unwrap())),
+        http: reqwest::Client::new(),
+        log,
+        debug: |_| {},
+    };
+    Connectors::start(vec![service], deps).await.unwrap()
 }
 
 fn log() -> Arc<Trajectory> {
@@ -248,8 +251,7 @@ async fn a_bankid_login_hands_the_bank_session_to_the_agents_requests() {
     let (base, bank) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
     let log = log();
-    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone());
-    gateway.start().await;
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone()).await;
     let accounts = base.join("/ssc/accounts").unwrap();
     assert_eq!(
         gateway.attach(&accounts),
@@ -310,8 +312,7 @@ async fn cookies_the_bank_sets_on_the_agents_requests_are_kept() {
     let (base, bank) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
     let log = log();
-    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone());
-    gateway.start().await;
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone()).await;
     log_in(&gateway, &bank, &log).await;
 
     let accounts = base.join("/ssc/accounts").unwrap();
@@ -333,24 +334,20 @@ async fn a_restart_restores_the_session_or_notices_it_has_ended() {
     let (base, bank) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
     let vault = dir.path().join("vault.db");
-    let first = gateway(&base, &vault, log());
-    first.start().await;
+    let first = gateway(&base, &vault, log()).await;
     let log_one = log();
-    let signed_in = gateway(&base, &vault, log_one.clone());
-    signed_in.start().await;
+    let signed_in = gateway(&base, &vault, log_one.clone()).await;
     log_in(&signed_in, &bank, &log_one).await;
     drop(first);
 
     // Same vault, still signed in at the bank: connected without a login.
-    let restarted = gateway(&base, &vault, log());
-    restarted.start().await;
+    let restarted = gateway(&base, &vault, log()).await;
     assert_eq!(status(&restarted), ConnectionStatus::Connected);
 
     // The bank ended the session meanwhile: the check on start notices.
     bank.revoked.store(true, Ordering::SeqCst);
     let log_two = log();
-    let later = gateway(&base, &vault, log_two.clone());
-    later.start().await;
+    let later = gateway(&base, &vault, log_two.clone()).await;
     assert_eq!(status(&later), ConnectionStatus::Expired);
     assert!(notices(&log_two).iter().any(|n| n.contains("needs signing in again")));
 }
@@ -360,8 +357,7 @@ async fn a_rejected_request_ends_the_session_and_clears_it() {
     let (base, bank) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
     let log = log();
-    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone());
-    gateway.start().await;
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone()).await;
     log_in(&gateway, &bank, &log).await;
 
     let redirected = ResponseHead {
@@ -389,8 +385,7 @@ async fn a_declined_or_unanswered_login_leaves_the_connection_as_it_was() {
     let (base, bank) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
     let log = log();
-    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone());
-    gateway.start().await;
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log.clone()).await;
 
     bank.declined.store(true, Ordering::SeqCst);
     let declined = gateway.connect("seb", Duration::from_secs(5)).await;
@@ -409,7 +404,7 @@ async fn a_declined_or_unanswered_login_leaves_the_connection_as_it_was() {
 async fn sebs_skill_tells_the_agent_how_and_its_code_works() {
     let (base, _) = fake_seb().await;
     let dir = tempfile::tempdir().unwrap();
-    let gateway = gateway(&base, &dir.path().join("vault.db"), log());
+    let gateway = gateway(&base, &dir.path().join("vault.db"), log()).await;
     assert!(gateway.connections()[0].skill);
     let skill = gateway.skill("seb").unwrap();
     assert!(skill.contains("accounts-widget/api/accounts/all"), "{skill}");

@@ -2,7 +2,7 @@
 //! hand the human the autostart link, poll until it's approved, then let the
 //! service turn the approved order into a logged-in session (cookies).
 //!
-//! Each service implements those steps; the gateway does everything around
+//! Each service implements those steps; the session does everything around
 //! them (the link, the poll loop and its deadline, keeping the session alive).
 
 use std::time::Duration;
@@ -16,8 +16,30 @@ use super::{
     seb::{Seb, SebLogin},
 };
 
-/// A BankID order expires after a few minutes if nobody approves it.
-pub const ORDER_LIFETIME: Duration = Duration::from_secs(180);
+/// Where the autostart link points: the BankID app on the human's phone.
+const APP: &str = "https://app.bankid.com/";
+
+/// How a BankID connection paces itself.
+#[derive(Clone, Copy, Debug)]
+pub struct BankIdTiming {
+    /// How often to ask whether the human has approved.
+    pub poll_every: Duration,
+    /// How long to wait for the human before withdrawing the order. BankID
+    /// expires orders after three minutes anyway.
+    pub order_lifetime: Duration,
+    /// How often to check that a session is alive, and keep it so.
+    pub keepalive_every: Duration,
+}
+
+impl Default for BankIdTiming {
+    fn default() -> Self {
+        BankIdTiming {
+            poll_every: Duration::from_secs(2),
+            order_lifetime: Duration::from_secs(180),
+            keepalive_every: Duration::from_secs(4 * 60),
+        }
+    }
+}
 
 /// The services with a BankID login.
 pub enum BankIdProvider {
@@ -41,14 +63,6 @@ pub enum Progress {
 }
 
 impl BankIdProvider {
-    /// A known provider, by the name used in config.
-    pub fn for_name(name: &str) -> Option<Self> {
-        match name {
-            "seb" => Some(BankIdProvider::Seb(Seb::production())),
-            _ => None,
-        }
-    }
-
     /// Start an order. Returns the login and the autostart token for the human.
     pub async fn start(&self, browser: &Browser) -> Result<(Login, Secret), String> {
         match self {
@@ -79,30 +93,10 @@ impl BankIdProvider {
         }
     }
 
-    pub fn poll_every(&self) -> Duration {
-        match self {
-            BankIdProvider::Seb(seb) => seb.poll_every(),
-        }
-    }
-
-    /// How long to wait for the human to approve before withdrawing the order.
-    pub fn order_lifetime(&self) -> Duration {
-        match self {
-            BankIdProvider::Seb(seb) => seb.order_lifetime(),
-        }
-    }
-
     /// A cheap request that shows the session is alive, and keeps it so.
     pub fn keepalive(&self) -> Url {
         match self {
             BankIdProvider::Seb(seb) => seb.keepalive(),
-        }
-    }
-
-    /// How the agent uses the service, compiled in with the provider.
-    pub fn skill(&self) -> Option<&'static str> {
-        match self {
-            BankIdProvider::Seb(_) => Some(include_str!("skills/seb.md")),
         }
     }
 
@@ -117,8 +111,25 @@ impl BankIdProvider {
 /// The link that opens the BankID app on the human's phone. `redirect=null`
 /// leaves them in the app once they've approved.
 pub fn autostart_link(token: &Secret) -> String {
-    format!(
-        "https://app.bankid.com/?autostarttoken={}&redirect=null",
-        token.expose()
-    )
+    format!("{APP}?autostarttoken={}&redirect=null", token.expose())
+}
+
+/// The autostart link in a notice, for showing it some other way, like a QR code.
+pub fn find_link(notice: &str) -> Option<&str> {
+    notice.split_whitespace().find(|word| word.starts_with(APP))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_link_in_a_notice_can_be_found_again() {
+        let link = autostart_link(&Secret::new("ast-1"));
+        assert_eq!(
+            find_link(&format!("Sign in to seb with BankID on your phone: {link}")),
+            Some(link.as_str())
+        );
+        assert_eq!(find_link("seb is connected."), None);
+    }
 }

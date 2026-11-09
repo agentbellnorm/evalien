@@ -11,474 +11,219 @@
 //!   BankID app. Their session is cookies, kept in the vault and kept alive
 //!   while the agent uses it.
 //!
-//! See docs/connectors.md.
+//! [`config`] reads what's configured, [`providers`] turns provider names
+//! into implementations, and [`Connectors`] routes requests to each
+//! connection's session, which runs itself. See docs/connectors.md.
 
+mod api_key;
 mod bankid;
 mod bankid_session;
 mod browser;
 mod callback;
 pub mod config;
+mod context;
+mod login;
 mod oauth;
+mod oauth_session;
+pub mod providers;
 mod seb;
 mod vault;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError, Weak},
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use reqwest::Url;
-use tokio::sync::{Notify, watch};
 
 use crate::domain::{
-    Attachment, Connecting, ConnectionInfo, ConnectionKind, ConnectionStatus, Event, Gateway, Origin, RequestCounts,
+    Attachment, Connecting, ConnectionInfo, ConnectionKind, ConnectionStatus, Gateway, Origin, RequestCounts,
     RequestOutcome, Secret, Trajectory,
 };
 
-use bankid_session::BankId;
+use api_key::ApiKey;
+use bankid_session::BankIdSession;
+use context::{Context, lock};
+use oauth_session::OAuthSession;
+use vault::ConnectionVault;
 
-pub use bankid::{BankIdProvider, Progress};
+pub use bankid::{BankIdProvider, BankIdTiming, Progress, find_link as find_bankid_link};
 pub use callback::serve as serve_callback;
 pub use config::{ConnectionConfig, GatewayConfig, KindConfig};
 pub use oauth::{OAuthClient, OAuthError};
+pub use oauth_session::OAuthLogins;
+pub use providers::{Credentials, Service};
 pub use seb::Seb;
 pub use vault::{Vault, VaultError, VaultKey};
 
-/// Refresh access tokens this long before they expire.
-const REFRESH_AHEAD: Duration = Duration::from_secs(5 * 60);
-/// Wait this long before retrying a refresh that failed for a temporary reason.
-const REFRESH_RETRY: Duration = Duration::from_secs(30);
-/// The vault item holding an OAuth connection's refresh token.
-const REFRESH_TOKEN: &str = "refresh_token";
+/// What the sessions need from the rest of the process.
+pub struct Deps {
+    /// Where sessions keep tokens and cookies. OAuth and BankID need it.
+    pub vault: Option<Arc<Vault>>,
+    /// For OAuth's token requests. BankID sessions bring their own browser.
+    pub http: reqwest::Client,
+    /// Where notices for the human go.
+    pub log: Arc<Trajectory>,
+    pub debug: fn(&str),
+}
 
 pub struct Connectors {
-    /// Itself, for spawning work that outlives a call, like a BankID login.
-    this: Weak<Connectors>,
     connections: Vec<Connection>,
     /// Which connection serves each origin. Config allows one per origin.
     by_origin: HashMap<Origin, usize>,
-    vault: Option<Vault>,
-    log: Arc<Trajectory>,
-    http: reqwest::Client,
-    redirect: Option<Url>,
-    debug: fn(&str),
 }
 
 struct Connection {
     name: String,
     origins: Vec<Origin>,
-    credentials: Credentials,
+    skill: Option<&'static str>,
+    session: Session,
     requests: Mutex<RequestCounts>,
 }
 
-enum Credentials {
-    ApiKey { header: String, value: Secret },
-    OAuth(Box<OAuth>),
-    BankId(Box<BankId>),
-}
-
-struct OAuth {
-    client: OAuthClient,
-    session: Mutex<Session>,
-    /// Asks the refresher to refresh now.
-    wake: Notify,
-}
-
-struct Session {
-    status: ConnectionStatus,
-    access: Option<AccessToken>,
-    login: Option<Login>,
-}
-
-struct AccessToken {
-    token: Secret,
-    expires: Instant,
-}
-
-/// What everyone waiting on a login watches: set once it finishes.
-type Waiting = watch::Receiver<Option<Result<(), String>>>;
-
-/// A login waiting for the human.
-struct Login {
-    state: String,
-    verifier: Secret,
-    /// The status to return to if the login doesn't finish.
-    before: ConnectionStatus,
-    /// Set once the login finishes; everyone in `connect` waits on it.
-    done: watch::Sender<Option<Result<(), String>>>,
+/// Each kind of connection, and the state it keeps.
+enum Session {
+    ApiKey(ApiKey),
+    OAuth(Arc<OAuthSession>),
+    BankId(Arc<BankIdSession>),
 }
 
 impl Connectors {
-    pub fn new(config: GatewayConfig, log: Arc<Trajectory>, debug: fn(&str)) -> Result<Arc<Self>, String> {
-        let vault = match config.vault {
-            Some(vault) => Some(Vault::open(&vault.path, &vault.key).map_err(|e| e.to_string())?),
-            None => None,
-        };
-        let http = reqwest::Client::builder()
-            .user_agent("evalien")
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
+    /// Build every connection's session, then start them: restore sessions
+    /// from the vault, check or refresh them, and keep them fresh from now on.
+    pub async fn start(services: Vec<Service>, deps: Deps) -> Result<Arc<Self>, String> {
         let mut by_origin = HashMap::new();
         let mut connections = Vec::new();
-        for (index, config) in config.connections.into_iter().enumerate() {
-            for origin in &config.origins {
+        for (index, service) in services.into_iter().enumerate() {
+            for origin in &service.origins {
                 by_origin.insert(origin.clone(), index);
             }
-            let credentials = match config.kind {
-                KindConfig::ApiKey { header, value } => Credentials::ApiKey { header, value },
-                KindConfig::OAuth { client } => Credentials::OAuth(Box::new(OAuth {
-                    client: *client,
-                    session: Mutex::new(Session {
-                        status: ConnectionStatus::NotConnected,
-                        access: None,
-                        login: None,
-                    }),
-                    wake: Notify::new(),
-                })),
-                KindConfig::BankId {
-                    provider,
-                    keepalive_for,
-                } => Credentials::BankId(Box::new(BankId::new(*provider, keepalive_for)?)),
-            };
+            let session = Session::new(&service.name, service.credentials, &deps)?;
             connections.push(Connection {
-                name: config.name,
-                origins: config.origins,
-                credentials,
+                name: service.name,
+                origins: service.origins,
+                skill: service.skill,
+                session,
                 requests: Mutex::new(RequestCounts::default()),
             });
         }
-        let redirect = config.callback.map(|callback| callback.redirect);
-        Ok(Arc::new_cyclic(|this| Connectors {
-            this: this.clone(),
-            connections,
-            by_origin,
-            vault,
-            log,
-            http,
-            redirect,
-            debug,
-        }))
-    }
-
-    /// Restore sessions from the vault, check or refresh them, and keep them
-    /// fresh from now on.
-    pub async fn start(self: &Arc<Self>) {
-        for (index, connection) in self.connections.iter().enumerate() {
-            match &connection.credentials {
-                Credentials::ApiKey { .. } => {}
-                Credentials::OAuth(oauth) => {
-                    if self.refresh_token(connection).is_some() {
-                        lock(&oauth.session).status = ConnectionStatus::Connected;
-                        self.refresh(connection, oauth).await;
-                    }
-                    tokio::spawn(self.clone().keep_fresh(index));
-                }
-                Credentials::BankId(bankid) => {
-                    self.restore_bankid(connection, bankid).await;
-                    tokio::spawn(self.clone().keep_bankid_alive(index));
-                }
-            }
+        for connection in &connections {
+            connection.session.start().await;
         }
+        Ok(Arc::new(Connectors { connections, by_origin }))
     }
 
-    /// Finish the login that issued `state`, with the code the provider sent
-    /// the browser back with. Returns the connection's name.
-    pub async fn complete(&self, state: &str, code: &str) -> Result<String, String> {
-        let (connection, oauth, login) = self.take_login(state)?;
-        let redirect = self.redirect.as_ref().ok_or("there's no OAuth callback configured")?;
-        let tokens = match oauth.client.exchange(&self.http, redirect, code, &login.verifier).await {
-            Ok(tokens) => tokens,
-            Err(error) => return Err(self.fail_login(connection, oauth, login, &error.to_string())),
-        };
-        let Some(refresh) = &tokens.refresh else {
-            return Err(self.fail_login(connection, oauth, login, "the provider sent no refresh token"));
-        };
-        if let Err(error) = self.vault().and_then(|vault| {
-            vault
-                .put(&connection.name, REFRESH_TOKEN, refresh)
-                .map_err(|e| e.to_string())
-        }) {
-            return Err(self.fail_login(connection, oauth, login, &error));
-        }
-        {
-            let mut session = lock(&oauth.session);
-            session.status = ConnectionStatus::Connected;
-            session.access = Some(AccessToken {
-                token: tokens.access,
-                expires: Instant::now() + tokens.expires_in,
-            });
-        }
-        oauth.wake.notify_one();
-        login.done.send_replace(Some(Ok(())));
-        self.notice(format!("{} is connected.", connection.name));
-        Ok(connection.name.clone())
-    }
-
-    /// The human or the provider turned the login down.
-    pub fn refuse(&self, state: &str, reason: &str) -> Result<String, String> {
-        let (connection, oauth, login) = self.take_login(state)?;
-        Err(self.fail_login(connection, oauth, login, reason))
-    }
-
-    fn take_login(&self, state: &str) -> Result<(&Connection, &OAuth, Login), String> {
-        for connection in &self.connections {
-            let Credentials::OAuth(oauth) = &connection.credentials else {
-                continue;
-            };
-            let mut session = lock(&oauth.session);
-            if session.login.as_ref().is_some_and(|login| login.state == state) {
-                let login = session.login.take().ok_or("the login just finished")?;
-                return Ok((connection, oauth, login));
-            }
-        }
-        Err("this sign-in link has expired or was already used; ask the agent to connect again".into())
-    }
-
-    fn fail_login(&self, connection: &Connection, oauth: &OAuth, login: Login, reason: &str) -> String {
-        lock(&oauth.session).status = login.before;
-        let message = format!("Signing in to {} failed: {reason}", connection.name);
-        login.done.send_replace(Some(Err(message.clone())));
-        self.notice(message.clone());
-        message
-    }
-
-    /// Refresh one connection's access tokens whenever they're due, for as
-    /// long as the process runs.
-    async fn keep_fresh(self: Arc<Self>, index: usize) {
-        let connection = &self.connections[index];
-        let Credentials::OAuth(oauth) = &connection.credentials else {
-            return;
-        };
-        loop {
-            let due = {
-                let session = lock(&oauth.session);
-                match (&session.status, &session.access) {
-                    (ConnectionStatus::Connected, Some(access)) => Some(
-                        access
-                            .expires
-                            .saturating_duration_since(Instant::now())
-                            .saturating_sub(REFRESH_AHEAD),
-                    ),
-                    (ConnectionStatus::Connected, None) => Some(Duration::ZERO),
+    /// The OAuth logins, for the callback to finish.
+    pub fn oauth_logins(&self) -> OAuthLogins {
+        OAuthLogins::new(
+            self.connections
+                .iter()
+                .filter_map(|connection| match &connection.session {
+                    Session::OAuth(session) => Some(session.clone()),
                     _ => None,
-                }
-            };
-            match due {
-                Some(wait) => {
-                    tokio::select! {
-                        () = tokio::time::sleep(wait) => {}
-                        () = oauth.wake.notified() => {}
-                    }
-                }
-                None => oauth.wake.notified().await,
-            }
-            if !self.refresh(connection, oauth).await {
-                tokio::time::sleep(REFRESH_RETRY).await;
-            }
-        }
-    }
-
-    /// Get a new access token. Returns false if it failed for a temporary reason.
-    async fn refresh(&self, connection: &Connection, oauth: &OAuth) -> bool {
-        if lock(&oauth.session).status != ConnectionStatus::Connected {
-            return true;
-        }
-        let Some(refresh) = self.refresh_token(connection) else {
-            lock(&oauth.session).status = ConnectionStatus::NotConnected;
-            return true;
-        };
-        match oauth.client.refresh(&self.http, &refresh).await {
-            Ok(tokens) => {
-                if let Some(rotated) = &tokens.refresh
-                    && let Err(error) = self.vault().and_then(|v| {
-                        v.put(&connection.name, REFRESH_TOKEN, rotated)
-                            .map_err(|e| e.to_string())
-                    })
-                {
-                    (self.debug)(&format!(
-                        "connectors: {}: keeping the rotated refresh token failed: {error}",
-                        connection.name
-                    ));
-                }
-                lock(&oauth.session).access = Some(AccessToken {
-                    token: tokens.access,
-                    expires: Instant::now() + tokens.expires_in,
-                });
-                true
-            }
-            Err(OAuthError::Refused(reason)) => {
-                if let Ok(vault) = self.vault() {
-                    let _ = vault.delete(&connection.name, REFRESH_TOKEN);
-                }
-                {
-                    let mut session = lock(&oauth.session);
-                    session.status = ConnectionStatus::Expired;
-                    session.access = None;
-                }
-                self.notice(format!("{} needs signing in again ({reason}).", connection.name));
-                true
-            }
-            Err(OAuthError::Failed(reason)) => {
-                (self.debug)(&format!(
-                    "connectors: refreshing {} failed, retrying: {reason}",
-                    connection.name
-                ));
-                false
-            }
-        }
-    }
-
-    fn refresh_token(&self, connection: &Connection) -> Option<Secret> {
-        let vault = self.vault().ok()?;
-        match vault.get(&connection.name, REFRESH_TOKEN) {
-            Ok(token) => token,
-            Err(error) => {
-                (self.debug)(&format!("connectors: {}: {error}", connection.name));
-                None
-            }
-        }
-    }
-
-    fn vault(&self) -> Result<&Vault, String> {
-        self.vault
-            .as_ref()
-            .ok_or_else(|| "there's no vault: set VAULT_KEY".to_owned())
-    }
-
-    fn notice(&self, text: String) {
-        if let Err(error) = self.log.append(Event::Notice { text }) {
-            (self.debug)(&format!("connectors: notice not recorded: {error}"));
-        }
+                })
+                .collect(),
+        )
     }
 
     fn named(&self, name: &str) -> Option<&Connection> {
         self.connections.iter().find(|connection| connection.name == name)
     }
-
-    /// Start a login, or join the one in progress. Returns the login's
-    /// `state` and what to wait on, or `None` if already connected.
-    fn begin_login(&self, connection: &Connection, oauth: &OAuth) -> Result<Option<(String, Waiting)>, String> {
-        let mut session = lock(&oauth.session);
-        if session.status == ConnectionStatus::Connected {
-            return Ok(None);
-        }
-        if let Some(login) = &session.login {
-            return Ok(Some((login.state.clone(), login.done.subscribe())));
-        }
-        let redirect = self.redirect.as_ref().ok_or("there's no OAuth callback configured")?;
-        let state = oauth::random_token().map_err(|e| e.to_string())?;
-        let pkce = oauth::Pkce::new().map_err(|e| e.to_string())?;
-        let url = oauth.client.authorization_url(redirect, &state, &pkce.challenge);
-        let (done, waiting) = watch::channel(None);
-        session.login = Some(Login {
-            state: state.clone(),
-            verifier: pkce.verifier,
-            before: session.status,
-            done,
-        });
-        session.status = ConnectionStatus::LoggingIn;
-        drop(session);
-        self.notice(format!("Sign in to {} so the agent can use it: {url}", connection.name));
-        Ok(Some((state, waiting)))
-    }
-
-    /// Give up on a login that took too long, if it's still the same one.
-    fn abandon_login(&self, oauth: &OAuth, state: &str) {
-        let mut session = lock(&oauth.session);
-        if session.login.as_ref().is_some_and(|login| login.state == state)
-            && let Some(login) = session.login.take()
-        {
-            session.status = login.before;
-        }
-    }
 }
 
-impl Connection {
-    /// How to use the service, if its provider says.
-    fn skill(&self) -> Option<&'static str> {
-        match &self.credentials {
-            Credentials::BankId(bankid) => bankid.skill(),
-            Credentials::ApiKey { .. } | Credentials::OAuth(_) => None,
+impl Session {
+    fn new(name: &str, credentials: Credentials, deps: &Deps) -> Result<Self, String> {
+        let context = || {
+            let vault = deps
+                .vault
+                .clone()
+                .ok_or_else(|| format!("connection {name} keeps its session in the vault: set VAULT_KEY"))?;
+            Ok::<_, String>(Context::new(
+                name,
+                ConnectionVault::new(vault, name),
+                deps.log.clone(),
+                deps.debug,
+            ))
+        };
+        Ok(match credentials {
+            Credentials::ApiKey(key) => Session::ApiKey(key),
+            Credentials::OAuth { client, redirect } => {
+                Session::OAuth(OAuthSession::new(context()?, client, deps.http.clone(), redirect))
+            }
+            Credentials::BankId {
+                provider,
+                timing,
+                keepalive_for,
+            } => Session::BankId(BankIdSession::new(context()?, provider, timing, keepalive_for)?),
+        })
+    }
+
+    async fn start(&self) {
+        match self {
+            Session::ApiKey(_) => {}
+            Session::OAuth(session) => session.start().await,
+            Session::BankId(session) => session.start().await,
         }
     }
 
     fn kind(&self) -> ConnectionKind {
-        match self.credentials {
-            Credentials::ApiKey { .. } => ConnectionKind::ApiKey,
-            Credentials::OAuth(_) => ConnectionKind::OAuth,
-            Credentials::BankId(_) => ConnectionKind::BankId,
+        match self {
+            Session::ApiKey(_) => ConnectionKind::ApiKey,
+            Session::OAuth(_) => ConnectionKind::OAuth,
+            Session::BankId(_) => ConnectionKind::BankId,
         }
     }
 
-    /// An API key has no login to lose: a rejection is counted, and the next
-    /// request carries the key again.
     fn status(&self) -> ConnectionStatus {
-        match &self.credentials {
-            Credentials::ApiKey { .. } => ConnectionStatus::Connected,
-            Credentials::OAuth(oauth) => lock(&oauth.session).status,
-            Credentials::BankId(bankid) => lock(&bankid.session).status,
+        match self {
+            Session::ApiKey(_) => ConnectionStatus::Connected,
+            Session::OAuth(session) => session.status(),
+            Session::BankId(session) => session.status(),
+        }
+    }
+
+    /// The headers for a request to `url`, or why there are none.
+    fn attach(&self, url: &Url) -> Result<Vec<(String, Secret)>, ConnectionStatus> {
+        match self {
+            Session::ApiKey(key) => Ok(key.headers()),
+            Session::OAuth(session) => session.attach(),
+            Session::BankId(session) => session.attach(url),
+        }
+    }
+
+    fn observe(&self, response: &crate::domain::ResponseHead) {
+        match self {
+            Session::ApiKey(_) => {}
+            Session::OAuth(session) => session.observe(response),
+            Session::BankId(session) => session.observe(response),
+        }
+    }
+
+    async fn connect(&self, timeout: Duration) -> Result<ConnectionStatus, String> {
+        match self {
+            Session::ApiKey(_) => Ok(ConnectionStatus::Connected),
+            Session::OAuth(session) => session.connect(timeout).await,
+            Session::BankId(session) => session.connect(timeout).await,
         }
     }
 }
 
 impl Gateway for Connectors {
     fn attach(&self, url: &Url) -> Attachment {
-        let Some(connection) = self
-            .by_origin
-            .get(&Origin::of(url))
-            .map(|&index| &self.connections[index])
-        else {
+        let Some(&index) = self.by_origin.get(&Origin::of(url)) else {
             return Attachment::Nothing;
         };
-        let name = connection.name.clone();
-        match &connection.credentials {
-            Credentials::ApiKey { header, value } => Attachment::Credentials {
-                connection: name,
-                headers: vec![(header.clone(), value.clone())],
+        let connection = &self.connections[index];
+        match connection.session.attach(url) {
+            Ok(headers) => Attachment::Credentials {
+                connection: connection.name.clone(),
+                headers,
             },
-            Credentials::OAuth(oauth) => {
-                let session = lock(&oauth.session);
-                match &session.access {
-                    Some(access)
-                        if session.status == ConnectionStatus::Connected && access.expires > Instant::now() =>
-                    {
-                        let bearer = Secret::new(format!("Bearer {}", access.token.expose()));
-                        Attachment::Credentials {
-                            connection: name,
-                            headers: vec![("Authorization".into(), bearer)],
-                        }
-                    }
-                    _ => {
-                        if session.status == ConnectionStatus::Connected {
-                            oauth.wake.notify_one();
-                        }
-                        Attachment::NotConnected {
-                            connection: name,
-                            status: session.status,
-                        }
-                    }
-                }
-            }
-            Credentials::BankId(bankid) => {
-                let mut session = lock(&bankid.session);
-                if session.status != ConnectionStatus::Connected {
-                    return Attachment::NotConnected {
-                        connection: name,
-                        status: session.status,
-                    };
-                }
-                session.last_used = Instant::now();
-                let headers = bankid
-                    .browser
-                    .cookie_header(url)
-                    .map(|cookies| ("Cookie".to_owned(), cookies));
-                Attachment::Credentials {
-                    connection: name,
-                    headers: headers.into_iter().collect(),
-                }
-            }
+            Err(status) => Attachment::NotConnected {
+                connection: connection.name.clone(),
+                status,
+            },
         }
     }
 
@@ -499,14 +244,9 @@ impl Gateway for Connectors {
             }
         }
         if let RequestOutcome::Response(head) = &outcome {
-            match &connection.credentials {
-                // A rejected token may just be stale: refresh now rather than at expiry.
-                Credentials::OAuth(oauth) if head.status == 401 => oauth.wake.notify_one(),
-                Credentials::BankId(bankid) => self.observe_bankid(connection, bankid, head),
-                _ => {}
-            }
+            connection.session.observe(head);
         }
-        connection.status()
+        connection.session.status()
     }
 
     fn connections(&self) -> Vec<ConnectionInfo> {
@@ -514,74 +254,26 @@ impl Gateway for Connectors {
             .iter()
             .map(|connection| ConnectionInfo {
                 name: connection.name.clone(),
-                kind: connection.kind(),
-                status: connection.status(),
+                kind: connection.session.kind(),
+                status: connection.session.status(),
                 origins: connection.origins.clone(),
                 requests: *lock(&connection.requests),
-                skill: connection.skill().is_some(),
+                skill: connection.skill.is_some(),
             })
             .collect()
     }
 
     fn skill(&self, connection: &str) -> Option<String> {
-        self.named(connection)?.skill().map(str::to_owned)
+        self.named(connection)?.skill.map(str::to_owned)
     }
 
     fn connect(&self, name: &str, timeout: Duration) -> Connecting<'_> {
         let name = name.to_owned();
         Box::pin(async move {
-            let index = self
-                .connections
-                .iter()
-                .position(|connection| connection.name == name)
+            let connection = self
+                .named(&name)
                 .ok_or_else(|| format!("no connection named {name:?}"))?;
-            let connection = &self.connections[index];
-            if let Credentials::BankId(_) = &connection.credentials {
-                let Some(waiting) = self.begin_bankid(index)? else {
-                    return Ok(ConnectionStatus::Connected);
-                };
-                return wait_for_login(&name, waiting, timeout).await;
-            }
-            let Credentials::OAuth(oauth) = &connection.credentials else {
-                return Ok(connection.status());
-            };
-            let Some((state, mut waiting)) = self.begin_login(connection, oauth)? else {
-                return Ok(ConnectionStatus::Connected);
-            };
-            let finished = tokio::time::timeout(timeout, waiting.wait_for(Option::is_some))
-                .await
-                .map(|result| result.map(|outcome| outcome.clone()));
-            match finished {
-                Ok(Ok(Some(Ok(())))) => Ok(ConnectionStatus::Connected),
-                Ok(Ok(Some(Err(message)))) => Err(message),
-                Ok(Ok(None)) => Err("the login ended without a result".into()),
-                Ok(Err(_)) => Err("the login was dropped".into()),
-                Err(_) => {
-                    self.abandon_login(oauth, &state);
-                    Err(format!("{name}: no sign-in within {}s", timeout.as_secs()))
-                }
-            }
+            connection.session.connect(timeout).await
         })
     }
-}
-
-/// Wait for a login to finish. A BankID login keeps running after a timeout
-/// here, so a later `connect` can still catch it.
-async fn wait_for_login(name: &str, mut waiting: Waiting, timeout: Duration) -> Result<ConnectionStatus, String> {
-    let finished = tokio::time::timeout(timeout, waiting.wait_for(Option::is_some))
-        .await
-        .map(|result| result.map(|outcome| outcome.clone()));
-    match finished {
-        Ok(Ok(Some(Ok(())))) => Ok(ConnectionStatus::Connected),
-        Ok(Ok(Some(Err(message)))) => Err(message),
-        Ok(Ok(None)) => Err("the login ended without a result".into()),
-        Ok(Err(_)) => Err("the login was dropped".into()),
-        Err(_) => Err(format!("{name}: no sign-in within {}s", timeout.as_secs())),
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Each critical section is a few field updates, so a panic elsewhere
-    // can't leave the state half-changed.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

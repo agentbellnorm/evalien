@@ -4,7 +4,7 @@
 
 use std::{
     path::Path,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use base64::Engine;
@@ -127,6 +127,34 @@ impl Vault {
             connection: connection.to_owned(),
             item: item.to_owned(),
         }
+    }
+}
+
+/// One connection's items in the vault. A session only reaches its own.
+#[derive(Clone)]
+pub struct ConnectionVault {
+    vault: Arc<Vault>,
+    connection: String,
+}
+
+impl ConnectionVault {
+    pub fn new(vault: Arc<Vault>, connection: &str) -> Self {
+        ConnectionVault {
+            vault,
+            connection: connection.to_owned(),
+        }
+    }
+
+    pub fn get(&self, item: &str) -> Result<Option<Secret>, VaultError> {
+        self.vault.get(&self.connection, item)
+    }
+
+    pub fn put(&self, item: &str, value: &Secret) -> Result<(), VaultError> {
+        self.vault.put(&self.connection, item, value)
+    }
+
+    pub fn delete(&self, item: &str) -> Result<(), VaultError> {
+        self.vault.delete(&self.connection, item)
     }
 }
 

@@ -1,12 +1,12 @@
 //! The agent's composition root: which implementation fills each port.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use evalien::{
     chat::{self, Matrix},
     config::{self, Human},
-    connectors::{self, Connectors},
+    connectors::{self, Connectors, Vault},
     db::{self, Access, SqliteStore},
     domain::{Gateway, TRAJECTORY_TABLE, Timestamp, Trajectory},
     evaluation::{
@@ -49,25 +49,42 @@ async fn run() -> anyhow::Result<u8> {
     let budget = config.inference.budget;
     let model = Budgeted::daily(inference::connect(config.inference.model)?, budget, spent_today);
 
-    // The agent's own handle on the database, with the trajectory read-only.
     // The credential gateway, when there are connections to sign requests for.
     let connection_names: Vec<String> = config.gateway.connections.iter().map(|c| c.name.clone()).collect();
-    let callback = config.gateway.callback.as_ref().map(|callback| callback.listen);
     let gateway: Option<Arc<dyn Gateway>> = if connection_names.is_empty() {
         None
     } else {
-        let connectors = Connectors::new(config.gateway, log.clone(), debug).map_err(anyhow::Error::msg)?;
+        let gateway_config = config.gateway;
+        let redirect = gateway_config.callback.as_ref().map(|callback| &callback.redirect);
+        let services =
+            connectors::providers::resolve(gateway_config.connections, redirect).map_err(anyhow::Error::msg)?;
+        let vault = match &gateway_config.vault {
+            Some(vault) => Some(Arc::new(
+                Vault::open(&vault.path, &vault.key).with_context(|| format!("opening {}", vault.path.display()))?,
+            )),
+            None => None,
+        };
+        let deps = connectors::Deps {
+            vault,
+            http: reqwest::Client::builder()
+                .user_agent("evalien")
+                .timeout(Duration::from_secs(30))
+                .build()?,
+            log: log.clone(),
+            debug,
+        };
         // Restore signed-in sessions and refresh their tokens before the agent starts.
-        connectors.start().await;
-        if let Some(addr) = callback {
-            let listener = tokio::net::TcpListener::bind(addr)
+        let connectors = Connectors::start(services, deps).await.map_err(anyhow::Error::msg)?;
+        if let Some(callback) = &gateway_config.callback {
+            let listener = tokio::net::TcpListener::bind(callback.listen)
                 .await
-                .with_context(|| format!("serving the OAuth callback on {addr}"))?;
-            tokio::spawn(connectors::serve_callback(listener, connectors.clone(), debug));
+                .with_context(|| format!("serving the OAuth callback on {}", callback.listen))?;
+            tokio::spawn(connectors::serve_callback(listener, connectors.oauth_logins(), debug));
         }
         Some(connectors)
     };
 
+    // The agent's own handle on the database, with the trajectory read-only.
     let mut capabilities = Capabilities::none()
         .with_sql(Sql::open(&config.db_path, TRAJECTORY_TABLE)?)
         .with_fetch(Fetch::new(gateway.clone()).map_err(anyhow::Error::msg)?);

@@ -78,6 +78,10 @@ impl Fetch {
             method,
             body: request.body,
         };
+        // The first hop that has something to say about its connection is
+        // what the agent hears: a session that ended answers with a redirect
+        // to a login page, whose origin has no connection of its own.
+        let mut hint = None;
         for _ in 0..=MAX_REDIRECTS {
             check_url(&hop.url)?;
             let attachment = self.attach(&hop.url);
@@ -89,12 +93,13 @@ impl Fetch {
                 builder = builder.body(body.clone());
             }
             let sent = builder.send().await;
-            let hint = match &attachment {
+            let said = match &attachment {
                 Attachment::NotConnected { connection, status } => {
                     Some(format!("{connection}; status={}", status.as_str()))
                 }
                 _ => self.observe(&attachment, &hop.url, sent.as_ref().ok()),
             };
+            hint = hint.or(said);
             let response = sent.map_err(|e| describe(&e))?;
             let location = response.headers().get(LOCATION).and_then(|value| value.to_str().ok());
             match next_hop(&hop, response.status(), location) {

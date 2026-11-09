@@ -34,11 +34,7 @@ use serde::Deserialize;
 
 use crate::domain::{Origin, Secret};
 
-use super::{
-    bankid::BankIdProvider,
-    oauth::OAuthClient,
-    vault::{VaultError, VaultKey},
-};
+use super::vault::{VaultError, VaultKey};
 
 /// Everything the gateway needs, checked.
 #[derive(Default)]
@@ -59,7 +55,8 @@ pub struct CallbackConfig {
     pub redirect: Url,
 }
 
-/// One connection, checked and with its secrets filled in.
+/// One connection, checked and with its secrets filled in. Providers are
+/// still names here: [`super::providers`] knows what they mean.
 pub struct ConnectionConfig {
     pub name: String,
     pub origins: Vec<Origin>,
@@ -70,12 +67,14 @@ pub enum KindConfig {
     /// A fixed header on every request.
     ApiKey { header: String, value: Secret },
     /// Bearer tokens from an OAuth login, refreshed as needed.
-    OAuth { client: Box<OAuthClient> },
-    /// Session cookies from a Mobile BankID login, kept alive while in use.
-    BankId {
-        provider: Box<BankIdProvider>,
-        keepalive_for: Duration,
+    OAuth {
+        provider: String,
+        client_id: String,
+        client_secret: Secret,
+        scopes: Vec<String>,
     },
+    /// Session cookies from a Mobile BankID login, kept alive while in use.
+    BankId { provider: String, keepalive_for: Duration },
 }
 
 #[derive(Deserialize)]
@@ -244,17 +243,13 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
                 if scopes.is_empty() {
                     return Err(fail("list the scopes to ask for".into()));
                 }
-                let client = OAuthClient::for_provider(
-                    &provider,
-                    secret(&client_id)?,
-                    Secret::new(secret(&client_secret)?),
-                    scopes,
-                )
-                .ok_or_else(|| fail(format!("unknown OAuth provider {provider:?}; known: google")))?;
                 (
                     origins,
                     KindConfig::OAuth {
-                        client: Box::new(client),
+                        provider,
+                        client_id: secret(&client_id)?,
+                        client_secret: Secret::new(secret(&client_secret)?),
+                        scopes,
                     },
                 )
             }
@@ -263,8 +258,6 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
                 origins,
                 keepalive_for,
             } => {
-                let provider = BankIdProvider::for_name(&provider)
-                    .ok_or_else(|| fail(format!("unknown BankID provider {provider:?}; known: seb")))?;
                 let keepalive_for = match keepalive_for {
                     Some(text) => humantime::parse_duration(&text).map_err(|e| fail(format!("keepalive_for: {e}")))?,
                     None => DEFAULT_KEEPALIVE,
@@ -272,7 +265,7 @@ pub fn parse(text: &str, env: &HashMap<String, String>) -> Result<Vec<Connection
                 (
                     origins,
                     KindConfig::BankId {
-                        provider: Box::new(provider),
+                        provider,
                         keepalive_for,
                     },
                 )
@@ -330,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oauth_connection_names_a_known_provider_and_its_client() {
+    fn an_oauth_connection_names_its_provider_and_client() {
         let text = r#"
             [connections.google-calendar]
             kind = "oauth"
@@ -341,9 +334,13 @@ mod tests {
             client_secret = { secret = "CLIENT_SECRET" }
         "#;
         let connections = parse(text, &env()).unwrap();
-        assert!(matches!(connections[0].kind, KindConfig::OAuth { .. }));
-        let unknown = parse(&text.replace("\"google\"", "\"myspace\""), &env()).err().unwrap();
-        assert!(unknown.contains("unknown OAuth provider"), "{unknown}");
+        let KindConfig::OAuth {
+            provider, client_id, ..
+        } = &connections[0].kind
+        else {
+            panic!("expected OAuth")
+        };
+        assert_eq!((provider.as_str(), client_id.as_str()), ("google", "id-1"));
     }
 
     #[test]
@@ -360,12 +357,6 @@ mod tests {
         let default = parse(&text("", "seb"), &env()).unwrap();
         assert!(
             matches!(default[0].kind, KindConfig::BankId { keepalive_for, .. } if keepalive_for == DEFAULT_KEEPALIVE)
-        );
-        assert!(
-            parse(&text("", "nordea"), &env())
-                .err()
-                .unwrap()
-                .contains("unknown BankID provider")
         );
         assert!(
             parse(&text("keepalive_for = \"soon\"", "seb"), &env())
