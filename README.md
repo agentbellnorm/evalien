@@ -122,16 +122,17 @@ The manifests in [`deploy/k8s/`](deploy/k8s/) run one pod with a Longhorn volume
      register_new_matrix_user http://localhost:8008 -c /theconfig/homeserver.yaml -u evalien --no-admin
    ```
 2. From your own account, create a room with encryption off (it can't be turned off later) and invite the agent's account. Put the room ID exactly as Room settings → Advanced shows it, and your own user ID, in `deploy/k8s/03-config.yaml`.
-3. Create the namespace and the `evalien-secrets` Secret. The script logs in as the agent to get its access token, and takes the Anthropic key from `.env` or asks for it:
+3. Secrets live in 1Password (vault `Bushnet`, item `evalien`, one field per key). The cluster's External Secrets Operator syncs them into the `evalien-secrets` Secret ([`08-external-secret.yaml`](deploy/k8s/08-external-secret.yaml)), and Reloader restarts the pod when they change. The scripts write to 1Password with `op`. This one logs in as the agent to get its access token, and takes the Anthropic key from `.env` or asks for it:
    ```
    ./scripts/create-secrets.sh
    ```
-4. Set the secrets the connections in `03-config.yaml` name, each prompted for so it's never echoed, and generate the vault key once:
+4. Set the secrets the connections in `03-config.yaml` name, each prompted for so it's never echoed, and generate the vault key once. A new key also needs an entry in `08-external-secret.yaml`:
    ```
    ./scripts/set-secret.sh GOOGLE_CLIENT_ID
    ./scripts/set-secret.sh GOOGLE_CLIENT_SECRET
    ./scripts/set-secret.sh VAULT_KEY --generate
    ```
+   Never replace `VAULT_KEY`: what's already in the vault becomes unreadable.
    OAuth sign-ins land on `https://evalien.bushnet.diy/oauth/callback`, so the browser needs to be on the tailnet while signing in. Register that URL as the OAuth client's redirect URI.
 5. Build and deploy through the cluster's pipeline: a Jenkins multibranch job on this repo builds the image (`Jenkinsfile`), pushes it to the cluster registry, and bumps the tag in `deploy/k8s/04-deployment.yaml`. ArgoCD deploys `deploy/k8s` from `main`; apply its Application once:
    ```

@@ -3,6 +3,9 @@ kind: Deployment
 metadata:
   name: evalien
   namespace: evalien
+  annotations:
+    # Restart when evalien-secrets changes (it's synced from 1Password).
+    secret.reloader.stakater.com/reload: evalien-secrets
 spec:
   replicas: 1
   # Never two pods on the same database: stop the old one before starting the new.

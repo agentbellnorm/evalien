@@ -1,5 +1,5 @@
 # Everything that isn't secret. The API key and Matrix access token live in
-# the evalien-secrets Secret; see README.md for how to create it.
+# the evalien-secrets Secret, synced from 1Password (08-external-secret.yaml).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -24,7 +24,7 @@ data:
   MATRIX_OWNER: "@morgan:matrix.skum.dev"
 ---
 # External services the gateway attaches credentials for. Secrets are named
-# here and live in the evalien-secrets Secret. See docs/connectors.md.
+# here and live in the evalien-secrets Secret (1Password, 08-external-secret.yaml). See docs/connectors.md.
 apiVersion: v1
 kind: ConfigMap
 metadata:
